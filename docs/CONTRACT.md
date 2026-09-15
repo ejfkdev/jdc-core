@@ -81,7 +81,7 @@ never sees a constant pool, a `Signature` attribute or an `InnerClasses` table:
 | `ctor_formals_by_arity`, `ctor_param_types` | `new`-site argument typing. |
 | `sam_ret_cast` | Functional-interface SAM return resolution. |
 | `local_class_internal` | `$`-marker → local-class name. |
-| `nested_method` | **The big one**: decompile a nested method body (lambda / anonymous-class method / local-class method) *including the front-end's idiom recovery*, given the call-site context (`outer_vt`, `param_names`, `captures`). |
+| `nested_method` | **The big one**: decompile a nested method body (lambda / anonymous-class method / local-class method) *including the front-end's idiom recovery*. Takes the `LambdaExpr` (which carries the impl owner/name/descriptor, the SAM parameter names, the capture expressions and any front-end annotations such as capture snapshots) plus the enclosing `VarTable` — the lexical scope the body is printed in. |
 
 Every method has a conservative default; `NullCtx` answers "unknown" to all of
 them, and the core degrades gracefully (no nesting assumptions, no generic

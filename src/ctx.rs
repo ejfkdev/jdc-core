@@ -206,6 +206,23 @@ pub trait Ctx {
     /// that case, but call sites still need the qualified-new form).
     fn outer_param_via_super(&self, internal: &str) -> bool;
 
+    /// Decompile the nested method a lambda site refers to — a lambda body,
+    /// an anonymous-class method, or a local-class method — and run the
+    /// front-end's own idiom recovery on it.
+    ///
+    /// This is where machine-specific desugaring lives: the shared emitter
+    /// asks for a finished statement tree and prints it. The `LambdaExpr`
+    /// carries the call-site facts (impl owner/name/descriptor, the SAM's
+    /// parameter names, the capture expressions, and any front-end
+    /// annotations it attached, e.g. capture snapshots); `outer_vt` is the
+    /// enclosing method's variable table — the lexical scope the body will be
+    /// printed in.
+    fn nested_method(
+        &self,
+        l: &crate::ir::expr::LambdaExpr,
+        outer_vt: &crate::var::VarTable,
+    ) -> Option<MethodBody>;
+
     /// Parameter types of the `<init>` of `internal` matching `skip + n`
     /// descriptor args, with `skip` leading synthetic parameters removed.
     /// Used to print `new` arguments with boolean/char constant adjustment.
@@ -238,28 +255,6 @@ pub trait Ctx {
         !self.class_type_params(internal).is_empty()
     }
 
-    /// Decompile the nested method `owner.name(desc)` — a lambda body, an
-    /// anonymous-class method, or a method of a local class — and run the
-    /// front-end's own idiom recovery on it.
-    ///
-    /// This is where machine-specific desugaring lives: the shared emitter
-    /// asks for a finished statement tree and prints it. The extra arguments
-    /// are the *call-site context* the front-end needs to make the body
-    /// printable where it will be inlined:
-    /// * `outer_vt` — the enclosing method's variables (capture renames,
-    ///   parameter-name syncing);
-    /// * `param_names` — the SAM parameter names recorded at the `invokedynamic`
-    ///   site (used to split `[captures..., SAM params]`);
-    /// * `captures` — the capture expressions at the site (type lifting).
-    fn nested_method(
-        &self,
-        owner: &str,
-        name: &str,
-        desc: &str,
-        outer_vt: &crate::var::VarTable,
-        param_names: &[String],
-        captures: &[Expr],
-    ) -> Option<MethodBody>;
 }
 
 /// A `Ctx` with no metadata: every query answers "unknown".
@@ -342,12 +337,8 @@ impl Ctx for NullCtx {
     }
     fn nested_method(
         &self,
-        _owner: &str,
-        _name: &str,
-        _desc: &str,
+        _l: &crate::ir::expr::LambdaExpr,
         _outer_vt: &crate::var::VarTable,
-        _param_names: &[String],
-        _captures: &[Expr],
     ) -> Option<MethodBody> {
         None
     }

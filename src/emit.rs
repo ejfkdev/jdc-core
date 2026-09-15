@@ -2045,14 +2045,13 @@ impl<'a> Printer<'a> {
                 // ...) — belongs to the front-end: that is where
                 // machine-specific desugaring lives. Ask it for a finished
                 // statement tree and print that.
-                let nested = self.ctx.nested_method(
-                    &l.impl_owner,
-                    &l.impl_name,
-                    &l.impl_desc.to_string(),
-                    self.vt,
-                    &l.param_names,
-                    &l.captures,
-                );
+                // The nested-body preparation — decompiling the impl method
+                // and running the front-end's idiom recovery (anonymous
+                // inlining, capture snapshots, enum switches, witness casts,
+                // outer-this substitution, label pruning, ...) — belongs to
+                // the front-end: that is where machine-specific desugaring
+                // lives. Ask it for a finished statement tree and print that.
+                let nested = self.ctx.nested_method(l, self.vt);
                 // params: prefer the impl method's own parameter names so the
                 // printed parameter list matches the body's references
                 // (instance lambda impls carry only the SAM params).
