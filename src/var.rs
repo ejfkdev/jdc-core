@@ -163,7 +163,7 @@ impl VarTable {
     }
 }
 
-fn sig_type_at(
+pub fn sig_type_at(
     lvtt: &[(u16, u16, String, u16)],
     start: u16,
     slot: u16,
@@ -179,7 +179,7 @@ fn sig_type_at(
         .filter(|tr| sig_matches_base(tr, base))
 }
 
-fn sig_matches_base(tr: &TypeRef, base: &JavaType) -> bool {
+pub fn sig_matches_base(tr: &TypeRef, base: &JavaType) -> bool {
     let g = match tr {
         TypeRef::G(g) => g,
         TypeRef::J(_) => return true,
