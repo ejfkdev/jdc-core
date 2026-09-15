@@ -343,3 +343,12 @@ impl Ctx for NullCtx {
         None
     }
 }
+
+/// Assemble a [`MethodBody`] (front-ends return these from `Ctx::nested_method`).
+pub fn ctx_method_body(
+    body: crate::ir::stmt::Stmt,
+    vt: crate::var::VarTable,
+    desc: MethodDescriptor,
+) -> MethodBody {
+    MethodBody { body, vt, desc }
+}

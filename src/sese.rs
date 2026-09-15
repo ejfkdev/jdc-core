@@ -1470,7 +1470,7 @@ impl<'a> Structurer<'a> {
     /// Scan a converted Stmt tree for splice pathologies (see
     /// materialize_content_exits). Conservative: any hit rolls the exit
     /// back to the bare-break shape.
-    pub(crate) fn stmt_splice_pathology(s: &Stmt) -> bool {
+    pub fn stmt_splice_pathology(s: &Stmt) -> bool {
         Self::pathology_in(s, None)
     }
 

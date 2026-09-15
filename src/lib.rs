@@ -35,5 +35,5 @@ pub mod structure;
 pub mod typeutil;
 pub mod types;
 
-pub use ctx::{Ctx, Family, MethodBody, NestedClass, NestedKind, NullCtx};
+pub use ctx::{ctx_method_body, Ctx, Family, MethodBody, NestedClass, NestedKind, NullCtx};
 pub use ir::{BlockResult, Expr, Stmt, SwitchTargets, Term};

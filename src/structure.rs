@@ -396,12 +396,13 @@ pub fn immediate_postdom(
         }
         let mut rejected = false;
         if !self_loop && succs.iter().any(|&sc| sc == cand) {
-            // A "bare goto" stub: nothing but the terminator. The
-            // machine's instructions are the front-end's business, so ask
-            // the block result instead (empty statements + a Goto term).
-            let stmt_free = results.get(cand).map(|r| {
-                r.stmts.is_empty() && matches!(r.term, Term::Goto)
-            }).unwrap_or(false);
+            // A "bare goto" stub: exactly one machine instruction, the
+            // terminator itself. (Not "no statements": a block may carry
+            // stack leftovers — a lone `getstatic` before its `goto` — with
+            // no statements either, and the false-merge rejection below is
+            // calibrated on the instruction-level shape.)
+            let stmt_free = cfg.blocks[cand].ins_len == 1
+                && results.get(cand).map(|r| matches!(r.term, Term::Goto)).unwrap_or(false);
             // A statement-bearing successor is only a FALSE merge when
             // another path BYPASSES it (compound-if then-blocks, the
             // OCSP shared-assign block): some successor reaches one of
@@ -2316,12 +2317,16 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             }
             return r;
         }
-        self.structure_method_walk()
+        let r = self.structure_method_walk();
+        if crate::dbg_flag!("JCDC_DBG_REGIONS") {
+            eprintln!("REGIONS_WALK {:#?}", r);
+        }
+        r
     }
 
     /// The verified walk baseline, ungated: the SESE hybrid fallback in
     /// method.rs runs it on a fresh Structurer to compare emission counts.
-    pub(crate) fn structure_method_walk(&mut self) -> Region {
+    pub fn structure_method_walk(&mut self) -> Region {
         let universe: HashSet<usize> = self
             .cfg
             .blocks

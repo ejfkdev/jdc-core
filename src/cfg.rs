@@ -27,8 +27,10 @@ pub struct Block {
     /// (the structurer may reorder branches based on condition polarity).
     pub succ: Vec<usize>,
     pub pred: Vec<usize>,
-    /// Blocks that catch an exception raised inside this block.
-    pub handlers: Vec<usize>,
+    /// Exception-range indices this block is the HANDLER of (index into
+    /// `Cfg::exc_ranges`) — the structurer's try reconstruction reads those,
+    /// not source blocks.
+    pub handlers: Vec<u32>,
 }
 
 impl Block {
@@ -91,18 +93,27 @@ impl Cfg {
                 }
             }
         }
-        // Handler edges: a protected range's handler is a "handler" of every
-        // block whose span lies inside the range.
+        // Handler back-references, with jcdc's exact semantics:
+        //  * `Block.handlers` lists the exception-RANGE indices this block is
+        //    the handler of (the structurer's try reconstruction reads range
+        //    indices, not source blocks);
+        //  * a block is protected by a range when its FIRST offset lies inside
+        //    `[start, end)` — using `start < end` (not `end <= end`) keeps
+        //    blocks whose trailing return/throw sits exactly on the boundary
+        //    (`try { return f(); } catch ..` — the call is protected, the
+        //    areturn lands on `end` and can still reach the loop header
+        //    through the handler, which loop membership must see).
         let mut exc_edges = Vec::new();
         for (ri, r) in exc_ranges.iter().enumerate() {
-            let Some(handler) = blocks.iter().position(|b| b.start == r.handler) else {
-                continue;
-            };
-            for i in 0..blocks.len() {
-                let b = &blocks[i];
-                if b.start >= r.start && b.end <= r.end && b.end > b.start {
-                    exc_edges.push(ExcEdge { range: ri, from: i, to: handler });
-                    blocks[handler].handlers.push(i);
+            let handler = blocks.iter().position(|b| b.start == r.handler);
+            if let Some(h) = handler {
+                blocks[h].handlers.push(ri as u32);
+            }
+            for b in blocks.iter() {
+                if b.start >= r.start && b.start < r.end && b.ins_len != 0 {
+                    if let Some(h) = handler {
+                        exc_edges.push(ExcEdge { range: ri, from: b.id, to: h });
+                    }
                 }
             }
         }
@@ -114,6 +125,20 @@ impl Cfg {
         }
         let mut starts: Vec<u32> = blocks.iter().map(|b| b.start).collect();
         starts.sort_unstable();
+        if crate::dbg_flag!("JCDC_DBG_CORE_CFG") {
+            for b in &blocks {
+                eprintln!(
+                    "CORE_CFG b={} start={} end={} ins_len={} succ={:?} pred={:?} handlers={:?}",
+                    b.id, b.start, b.end, b.ins_len, b.succ, b.pred, b.handlers
+                );
+            }
+            for (i, r) in exc_ranges.iter().enumerate() {
+                eprintln!("CORE_EXC r={} {}..{} -> {} type={:?}", i, r.start, r.end, r.handler, r.catch_type);
+            }
+            for e in &exc_edges {
+                eprintln!("CORE_EDGE r={} from={} to={}", e.range, e.from, e.to);
+            }
+        }
         Cfg { blocks, entry, exc_edges, exc_ranges, starts }
     }
 
@@ -169,8 +194,11 @@ mod tests {
         assert_eq!(cfg.blocks[1].pred, vec![0]);
         assert_eq!(cfg.blocks[2].pred, vec![1]);
         assert_eq!(cfg.blocks[3].pred, Vec::<usize>::new());
-        assert_eq!(cfg.blocks[3].handlers, vec![0, 1, 2]);
+        // `handlers` holds the exception-RANGE indices this block handles;
+        // the protected side is `exc_edges[..].from`.
+        assert_eq!(cfg.blocks[3].handlers, vec![0]);
         assert_eq!(cfg.exc_edges.len(), 3);
+        assert!(cfg.exc_edges.iter().all(|e| e.range == 0 && e.to == 3));
         assert!(cfg.block_at(3) == Some(1));
         assert!(cfg.block_at(6) == Some(3));
         assert!(cfg.is_block_start(4) && !cfg.is_block_start(5));
