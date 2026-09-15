@@ -541,3 +541,41 @@ fn register_machine_try_catch() {
     );
     assert!(text.contains("throw e;"), "handler body lost:\n{}", text);
 }
+// ---------------------------------------------------------------------------
+// The REAL emitter, driven by a front-end that is not a JVM: `Printer` takes
+// the `Ctx` trait, so a register-machine front-end can print Java with it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn real_emitter_prints_register_machine_ir() {
+    use jdc_core::emit::Printer;
+    use jdc_core::types::JavaType;
+    use jdc_core::NullCtx;
+
+    let vt = vt_with(&[("n", JavaType::Int), ("r", JavaType::Int)]);
+    // n < 10 -> then / exit; then: r = n + 1 -> exit; exit: return r.
+    let cfg = Cfg::from_blocks(
+        vec![
+            blk(0, 0, 2, vec![2, 1]), // header: [fallthrough = exit(2), taken = body(1)]
+            blk(1, 2, 2, vec![0]),    // body -> header
+            blk(2, 4, 2, vec![]),     // exit
+        ],
+        0,
+        vec![],
+    );
+    let results = vec![
+        res(vec![], Term::Cond { cond: less_than(local(&vt, "n"), int(10)) }),
+        res(vec![assign(local(&vt, "r"), add(local(&vt, "n"), int(1)))], Term::Goto),
+        res(vec![Stmt::Return(Some(local(&vt, "r")))], Term::Return(None)),
+    ];
+
+    let body = structuralize(&cfg, &results);
+    let ctx = NullCtx { class_name: "demo/Register".into(), level: 52 };
+    let text = Printer::new(&ctx, &vt).into_string(&body);
+    println!("--- real emitter ---\n{}", text);
+
+    assert!(text.contains("while ("), "no loop:\n{}", text);
+    assert!(text.contains("n < 10"), "condition lost:\n{}", text);
+    assert!(text.contains("r = n + 1;"), "body lost:\n{}", text);
+    assert!(text.contains("return r;"), "return lost:\n{}", text);
+}
