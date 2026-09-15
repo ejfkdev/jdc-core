@@ -26,8 +26,23 @@ Build one `Cfg` per method body with `Cfg::from_blocks(blocks, entry, exc_ranges
 | `catch_type: None` | `finally`-style catch-all | catch-all handler |
 
 `from_blocks` turns a range into exception edges from every block inside it and
-fills each handler's `handlers` list — the structurer's try reconstruction reads
-only those.
+appends the range's **index** to the handler block's `handlers` list — the
+structurer's try reconstruction reads those indices, not source blocks. A block
+counts as "inside" a range when its **first** offset lies in `[start, end)` and
+it has code (`ins_len != 0`); the trailing `return`/`throw` of a
+`try { return f(); }` block lands exactly on `end` and stays with the try.
+
+**Deriving the machine-neutral view** (jcdc's `Cfg::to_core`): if your front-end
+keeps its own block struct and builds a `Cfg` from it, two rules matter.
+
+* Rebuild the snapshot at each use site — do not take one early and reuse it.
+  The structurer is not the only thing that runs: pre-structuring passes (jcdc's
+  `short_circuit_prefold`) rewrite successors, and a stale snapshot structures
+  the pre-fold graph. (Cost of getting this wrong in jcdc: 1,606 of 12,609
+  `rt.jar` units came out as throw stubs.)
+* Copy `pred` and `handlers` **verbatim** from the original blocks rather than
+  recomputing them. Those lists are whatever the front-end's passes have left
+  behind, and the structurer was calibrated against exactly that state.
 
 ## 2. Block results
 
@@ -87,15 +102,15 @@ Every method has a conservative default; `NullCtx` answers "unknown" to all of
 them, and the core degrades gracefully (no nesting assumptions, no generic
 casts, no nested bodies).
 
-**Emission seams** (what the `emit` port needs; see `wip/emit.rs.partial`):
-`source_level` (the old `major_version < 52` gates), `has_class` /
-`find_outer` / `class_bases` (name shortening and `$`-literal detection),
-`ctor_param_types` and `ctor_formals_by_arity` (`new`-site typing),
-`sam_ret_cast` / `class_type_params` / `polymorphic_ret_cast` (witness casts),
-`field_flags` / `method_flags` (shadowing, owner casts), `is_interface` /
-`is_sealed` / `is_subtype_of` (cast elision), and `nested_method` (lambda
-bodies — this one call replaces ~130 lines of front-end pipeline that used to
-live inside the printer).
+**Emission seams**: that table *is* the printer's metadata surface — `emit`
+calls nothing else. `source_level` gates newer syntax, `has_class` /
+`find_outer` / `class_bases` drive name shortening and `$`-literal detection,
+`ctor_param_types` + `ctor_formals_by_arity` type `new` sites, `sam_ret_cast` /
+`class_type_params` / `polymorphic_ret_cast` produce witness casts,
+`field_flags` / `method_flags` decide shadowing and owner casts, `is_interface`
+/ `is_sealed` / `is_subtype_of` elide casts, and `nested_method` returns lambda
+and nested-class bodies fully rendered (one call replaces the ~130 lines of
+front-end pipeline that used to live inside jcdc's printer).
 
 ## 5. Post-convert obligations
 

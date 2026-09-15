@@ -67,17 +67,21 @@ JCDC_DBG_REGIONS=1 ...           # region dump (with SESE)
 
 ## Status
 
-Ported and green (≈15k lines): types, IR, CFG, `structure`, `sese`, `convert`,
-`var`, `analysis`, `typeutil`, `ctx`.
+Ported and green (≈18k lines): types, IR, CFG, `structure`, `sese`, `convert`,
+`var`, `analysis`, `typeutil`, `ctx`, `emit`.
 
-Still to port from jcdc, in order of value:
+**Proven on a real front-end.** [jcdc](https://github.com/ejfkdev/jcdc) builds
+its class-file front-end on this crate, and its output over the whole of JDK 8
+`rt.jar` (12,609 units) is **byte-identical** to the same decompiler before the
+extraction — which is what the extraction had to preserve, because that output
+is the product of ~21 releases of JDK corpus tuning. Two rules a front-end must
+respect for that to hold are documented in
+[docs/CONTRACT.md](docs/CONTRACT.md) §1 (`Cfg::to_core`: rebuild the snapshot at
+each use site, copy preds/handlers verbatim).
 
-1. **`emit`** (≈3.3k lines) — the printer is written against the `Ctx` surface
-   already defined here; the WIP port lives in `wip/emit.rs.partial` and its
-   remaining seams are inventoried in `docs/CONTRACT.md` §4. Nothing in it needs
-   new abstractions, only the mechanical rewiring of ~10 class-metadata helpers
-   onto `Ctx`.
-2. **`passes`** (jcdc `method.rs`, ≈11.5k lines) — 121 of its 141 top-level
+Still to port from jcdc:
+
+1. **`passes`** (jcdc `method.rs`, ≈11.5k lines) — 121 of its 141 top-level
    items are already free of machine types and move as-is (diamond folding,
    booleanization, dead-store pruning, duplicate-declaration dedupe, label
    pruning, …); ~20 read class metadata and go behind `Ctx`. Until they move,
