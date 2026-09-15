@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets
+      # The suite includes the non-JVM toy front-end (both structurer paths).
+      - name: Test (walk structurer)
+        run: cargo test --workspace
+      - name: Test (SESE structurer)
+        run: cargo test --workspace
+        env:
+          JCDC_SESE: "1"
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: |
+          rustup component add clippy
+          cargo clippy --workspace --all-targets
