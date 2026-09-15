@@ -9,6 +9,7 @@
 use bitflags::bitflags;
 
 bitflags! {
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ClassAccessFlags: u16 {
         const PUBLIC = 0x0001;
@@ -30,6 +31,7 @@ bitflags! {
 }
 
 bitflags! {
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct FieldAccessFlags: u16 {
         const PUBLIC = 0x0001;
@@ -45,6 +47,7 @@ bitflags! {
 }
 
 bitflags! {
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct MethodAccessFlags: u16 {
         const PUBLIC = 0x0001;

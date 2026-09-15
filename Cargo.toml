@@ -1,6 +1,6 @@
 [package]
 name = "jdc-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Machine-neutral decompiler core: IR, CFG structuring, statement conversion, Java emission. Front-end agnostic (JVM class files, DEX, ...)."
 license = "MIT"
@@ -10,6 +10,13 @@ categories = ["development-tools::debugging"]
 
 [dependencies]
 bitflags = "2"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+# Serialize the shared type model (`types::*`): a front-end that offers a JSON
+# dump of its parse turns this on and forwards it from its own feature.
+serde = ["dep:serde", "bitflags/serde"]
 
 [profile.release]
 debug = true
