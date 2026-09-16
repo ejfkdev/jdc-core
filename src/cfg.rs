@@ -142,6 +142,26 @@ impl Cfg {
         Cfg { blocks, entry, exc_edges, exc_ranges, starts }
     }
 
+    /// Assemble a CFG from blocks the caller has **already filled in**:
+    /// `pred` and `handlers` are taken as given and `exc_edges` is supplied,
+    /// so no derivation runs.
+    ///
+    /// This is the constructor for a front-end that is mirroring a graph it
+    /// already maintains (jcdc's `Cfg::to_core`): the derivation above would
+    /// only be thrown away, and at four to five snapshots per method that
+    /// waste — plus the allocate-then-replace churn of the derived lists —
+    /// is measurable.
+    pub fn from_parts(
+        blocks: Vec<Block>,
+        entry: usize,
+        exc_ranges: Vec<ExcRange>,
+        exc_edges: Vec<ExcEdge>,
+    ) -> Cfg {
+        let mut starts: Vec<u32> = blocks.iter().map(|b| b.start).collect();
+        starts.sort_unstable();
+        Cfg { blocks, entry, exc_edges, exc_ranges, starts }
+    }
+
     /// Block containing machine offset `p`.
     pub fn block_at(&self, p: u32) -> Option<usize> {
         let i = self.starts.partition_point(|&l| l <= p);
