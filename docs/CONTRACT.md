@@ -61,8 +61,16 @@ Statement trees must be **Java-shaped** — everything downstream assumes it:
   `Outer.this` is **not**; materialize such values into a synthetic local
   instead (`discardedN` in jcdc) so trapping reads still happen.
 * `Stmt::LocalDef` declares; re-assignment after that is `Expr::Assign`.
-* `Stmt::Return`/`Throw` are statements; the matching `Term` says the block ends
-  there.
+* **`return` and `throw` belong in the `Term`, not in `stmts`.** A `return x`
+  bytecode is `Term::Return(Some(x))` with an empty statement list; the
+  converter materializes the `Stmt::Return` from the term (`convert::Converter`
+  appends it for `Basic` and copied-tail regions alike). Writing the statement
+  *and* setting the term makes the emitter print both — the source then ends
+  with a stray `return;` after its real return, because the term's value is
+  `None` and the block's statement is the other one.
+* Blocks that end in something other than return/throw never place those
+  statements in `stmts` either; reachability and shared-tail copying read the
+  term.
 
 ## 3. Variables
 

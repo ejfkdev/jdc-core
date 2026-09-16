@@ -8,13 +8,14 @@
 //!
 //! ```text
 //!   front-end (machine-specific)                jdc-core (machine-neutral)
-//!   ───────────────────────────                ──────────────────────────
-//!   parse bytes                                 cfg::Cfg        (blocks + edges)
-//!   decode instructions        ───────────────► ir::BlockResult (stmts + term)
-//!   build expressions per block                 structure::Structurer / sese
-//!   synthesize a VarTable                       convert::Converter
-//!   machine idioms (javac / d8 / ...)  ────────► passes::* (shared refinements)
-//!                                               emit::Printer   (source text)
+//!   ──────────────────────────                ──────────────────────────
+//!   parse bytes / decode                       cfg::Cfg          blocks + edges
+//!   build expressions per block   ──────────► ir::BlockResult   stmts + term
+//!   synthesize a VarTable                      structure::Structurer / sese
+//!   machine idioms (javac / d8 / R8 / ...)  ──► convert::Converter (Region → Stmt)
+//!   your refinement passes  ───────────────────► emit::Printer    Java source text
+//!   (the shared pass suite is the last
+//!    piece still living front-end-side)
 //! ```
 //!
 //! The front-end implements [`ctx::Ctx`] (naming, type queries, nested method

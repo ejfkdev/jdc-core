@@ -8,12 +8,13 @@ next) can share the hard half of a decompiler.
 ```
   front-end (machine-specific)                jdc-core (machine-neutral)
   ───────────────────────────                ──────────────────────────
-  parse bytes / decode                       cfg::Cfg         blocks + edges
-  build expressions per block   ───────────► ir::BlockResult  stmts + term
+  parse bytes / decode                       cfg::Cfg          blocks + edges
+  build expressions per block   ───────────► ir::BlockResult   stmts + term
   synthesize a VarTable                      structure::Structurer / sese
-  machine idioms (javac / d8 / R8 / ...)     convert::Converter
-                                 └─────────► passes::*        shared refinements
-                                             emit::Printer    Java source text
+  machine idioms (javac / d8 / R8 / ...)  ──► convert::Converter (Region → Stmt)
+  your refinement passes  ───────────────────► emit::Printer    Java source text
+  (the shared pass suite is the last
+   piece still living front-end-side)
 ```
 
 A decompiler is a pipeline. Only its **first two steps** know anything about the
@@ -23,6 +24,23 @@ conditionals, switches, exception regions, statement trees, expressions with
 precedence. That is the part this crate provides, and it is the part that took
 the most engineering in jcdc (structuring alone is ~12k lines that were tuned
 against a 21-release JDK corpus and a 48k-class third-party corpus).
+
+## Using it
+
+```toml
+[dependencies]
+jdc-core = "0.1.2"            # crates.io
+# …or pin the repo directly:
+# jdc-core = { git = "https://github.com/ejfkdev/jdc-core", tag = "v0.1.2" }
+```
+
+```sh
+cargo add jdc-core
+```
+
+`jcdc` (the JVM decompiler) builds on it too, as a **sibling path dependency**
+(`../jdc-core`) so its binary and the core move together; the pin there is a
+version, and a release builds the core tag that pin names.
 
 ## What is in the box
 

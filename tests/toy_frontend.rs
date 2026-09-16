@@ -399,7 +399,10 @@ fn register_machine_loop_with_if_else() {
         res(vec![assign(local(&vt, "r"), add(local(&vt, "r"), int(100)))], Term::Goto), // 3
         res(vec![assign(local(&vt, "r"), add(local(&vt, "r"), local(&vt, "i")))], Term::Goto), // 4
         res(vec![assign(local(&vt, "i"), add(local(&vt, "i"), int(1)))], Term::Goto),   // 5
-        res(vec![Stmt::Return(Some(local(&vt, "r")))], Term::Return(None)),       // 6
+        // The return's VALUE lives in the term; `stmts` stays empty and the
+        // converter materializes `return r;` (declaring both duplicates it —
+        // the real emitter then prints a stray `return;`).
+        res(vec![], Term::Return(Some(local(&vt, "r")))),                         // 6
     ];
 
     let body = structuralize(&cfg, &results);
@@ -456,7 +459,7 @@ fn register_machine_switch_with_default() {
         res(vec![assign(local(&vt, "r"), int(10))], Term::Goto),                   // 2
         res(vec![assign(local(&vt, "r"), int(20))], Term::Goto),                   // 3
         res(vec![assign(local(&vt, "r"), int(30))], Term::Goto),                   // 4
-        res(vec![Stmt::Return(Some(local(&vt, "r")))], Term::Return(None)),        // 5
+        res(vec![], Term::Return(Some(local(&vt, "r")))),                          // 5
     ];
 
     let body = structuralize(&cfg, &results);
@@ -566,7 +569,7 @@ fn real_emitter_prints_register_machine_ir() {
     let results = vec![
         res(vec![], Term::Cond { cond: less_than(local(&vt, "n"), int(10)) }),
         res(vec![assign(local(&vt, "r"), add(local(&vt, "n"), int(1)))], Term::Goto),
-        res(vec![Stmt::Return(Some(local(&vt, "r")))], Term::Return(None)),
+        res(vec![], Term::Return(Some(local(&vt, "r")))),
     ];
 
     let body = structuralize(&cfg, &results);
@@ -578,4 +581,7 @@ fn real_emitter_prints_register_machine_ir() {
     assert!(text.contains("n < 10"), "condition lost:\n{}", text);
     assert!(text.contains("r = n + 1;"), "body lost:\n{}", text);
     assert!(text.contains("return r;"), "return lost:\n{}", text);
+    // …and exactly once: a front-end that also writes the `return` into the
+    // block's statements gets a second, value-less `return;` here.
+    assert!(!text.contains("return;"), "duplicated return:\n{}", text);
 }
