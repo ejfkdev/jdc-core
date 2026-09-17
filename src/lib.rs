@@ -28,13 +28,13 @@ pub mod cfg;
 pub mod convert;
 pub mod ctx;
 pub mod dbg;
-pub mod var;
 pub mod emit;
 pub mod ir;
 pub mod sese;
 pub mod structure;
-pub mod typeutil;
 pub mod types;
+pub mod typeutil;
+pub mod var;
 
 pub use ctx::{ctx_method_body, Ctx, Family, MethodBody, NestedClass, NestedKind, NullCtx};
 pub use ir::{BlockResult, Expr, Stmt, SwitchTargets, Term};

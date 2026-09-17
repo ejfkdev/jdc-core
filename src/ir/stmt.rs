@@ -80,7 +80,9 @@ pub enum Stmt {
     /// A folded value-diamond: this "statement" represents a value left on
     /// the operand stack (consumed by the merge block). Removed after the
     /// merge statements are woven.
-    TernaryValue { e: Expr },
+    TernaryValue {
+        e: Expr,
+    },
     /// Raw monitorenter (before synchronized reconstruction).
     MonitorEnter(Expr),
     /// Raw monitorexit.
@@ -91,9 +93,16 @@ pub enum Stmt {
     Goto(u32),
     /// Local class declaration rendered inline in a method body.
     /// `header` is e.g. `Local implements Runnable`.
-    ClassDecl { name: String, header: String, body: String },
+    ClassDecl {
+        name: String,
+        header: String,
+        body: String,
+    },
     /// `label: statement`
-    Labeled { label: String, body: Box<Stmt> },
+    Labeled {
+        label: String,
+        body: Box<Stmt>,
+    },
     /// `break;` / `break label;`
     Break(Option<String>),
     /// `continue;` / `continue label;`
@@ -154,7 +163,11 @@ pub fn flatten(s: &mut Stmt) {
                 flatten(x);
             }
         }
-        Stmt::If { then_stmt, else_stmt, .. } => {
+        Stmt::If {
+            then_stmt,
+            else_stmt,
+            ..
+        } => {
             flatten(then_stmt);
             if let Some(e) = else_stmt {
                 flatten(e);
@@ -162,7 +175,11 @@ pub fn flatten(s: &mut Stmt) {
         }
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => flatten(body),
         Stmt::For { body, .. } | Stmt::ForEach { body, .. } => flatten(body),
-        Stmt::Try { body, catches, finally } => {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        } => {
             flatten(body);
             for c in catches {
                 flatten(&mut c.body);
@@ -171,7 +188,12 @@ pub fn flatten(s: &mut Stmt) {
                 flatten(f);
             }
         }
-        Stmt::TryWithResources { body, catches, finally, .. } => {
+        Stmt::TryWithResources {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
             flatten(body);
             for c in catches {
                 flatten(&mut c.body);

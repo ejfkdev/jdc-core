@@ -1,9 +1,9 @@
 //! Java source emission from the statement/expression tree.
 
-use crate::types::{JavaType};
+use crate::types::JavaType;
 
-use crate::ir::expr::{BinOp, ConcatPart, ConstVal, Expr, LambdaKind, TypeRef, UnOp};
 use crate::ctx::MethodBody;
+use crate::ir::expr::{BinOp, ConcatPart, ConstVal, Expr, LambdaKind, TypeRef, UnOp};
 use crate::ir::stmt::{CaseGroup, Catch, Stmt};
 use crate::var::VarTable;
 
@@ -67,7 +67,24 @@ pub struct Printer<'a> {
 
 impl<'a> Printer<'a> {
     pub fn new(ctx: &'a dyn crate::ctx::Ctx, vt: &'a VarTable) -> Self {
-        Printer { ctx, vt, out: String::new(), indent: 0, lambda_depth: 0, outer_names: Vec::new(), line_buf: String::new(), ret_bool: false, suppress_poly_cast: false, suppress_diamond: false, in_cond: false, lambda_sam_ret: None, ret_sam: None, ret_char: false, ret_byte: false, ret_short: false }
+        Printer {
+            ctx,
+            vt,
+            out: String::new(),
+            indent: 0,
+            lambda_depth: 0,
+            outer_names: Vec::new(),
+            line_buf: String::new(),
+            ret_bool: false,
+            suppress_poly_cast: false,
+            suppress_diamond: false,
+            in_cond: false,
+            lambda_sam_ret: None,
+            ret_sam: None,
+            ret_char: false,
+            ret_byte: false,
+            ret_short: false,
+        }
     }
 
     pub fn with_ret_bool(mut self, b: bool) -> Self {
@@ -118,7 +135,11 @@ impl<'a> Printer<'a> {
                 matches!(&**t, Expr::Const(ConstVal::Int(0 | 1)))
                     && matches!(&**f, Expr::Const(ConstVal::Int(0 | 1)))
             }
-            Expr::Un { op: crate::ir::expr::UnOp::Not, .. } | Expr::InstanceOf { .. } => true,
+            Expr::Un {
+                op: crate::ir::expr::UnOp::Not,
+                ..
+            }
+            | Expr::InstanceOf { .. } => true,
             Expr::Bin { op, .. } => matches!(
                 op,
                 crate::ir::expr::BinOp::Eq
@@ -143,12 +164,17 @@ impl<'a> Printer<'a> {
     fn bool_ish_vt(&self, x: &Expr) -> bool {
         match x {
             Expr::Local { var, .. } => {
-                matches!(self.vt.var(*var).ty.erased(), crate::types::JavaType::Boolean)
+                matches!(
+                    self.vt.var(*var).ty.erased(),
+                    crate::types::JavaType::Boolean
+                )
             }
             Expr::Bin { op, l, r, .. }
                 if matches!(
                     op,
-                    crate::ir::expr::BinOp::And | crate::ir::expr::BinOp::Or | crate::ir::expr::BinOp::Xor
+                    crate::ir::expr::BinOp::And
+                        | crate::ir::expr::BinOp::Or
+                        | crate::ir::expr::BinOp::Xor
                 ) =>
             {
                 self.bool_ish_vt(l) && self.bool_ish_vt(r)
@@ -170,7 +196,9 @@ impl<'a> Printer<'a> {
             Expr::Bin { op: bop, l, r, .. }
                 if matches!(
                     bop,
-                    crate::ir::expr::BinOp::Xor | crate::ir::expr::BinOp::And | crate::ir::expr::BinOp::Or
+                    crate::ir::expr::BinOp::Xor
+                        | crate::ir::expr::BinOp::And
+                        | crate::ir::expr::BinOp::Or
                 ) && self.bool_ish_vt(l)
                     && self.bool_ish_vt(r) =>
             {
@@ -210,7 +238,11 @@ impl<'a> Printer<'a> {
                     (Some(true), Some(false)) => self.expr_bool(c, out),
                     (Some(false), Some(true)) => {
                         // !(!x) collapses to x
-                        if let Expr::Un { op: crate::ir::expr::UnOp::Not, e: inner } = &**c {
+                        if let Expr::Un {
+                            op: crate::ir::expr::UnOp::Not,
+                            e: inner,
+                        } = &**c
+                        {
                             self.expr_bool(inner, out);
                         } else {
                             out.push('!');
@@ -395,7 +427,12 @@ impl<'a> Printer<'a> {
                 self.line(&line);
                 self.line_buf = line;
             }
-            Stmt::LocalDef { var, init, is_final, force_type } => {
+            Stmt::LocalDef {
+                var,
+                init,
+                is_final,
+                force_type,
+            } => {
                 let _ = force_type;
                 let info = self.vt.var(*var);
                 let mut line = std::mem::take(&mut self.line_buf);
@@ -425,10 +462,9 @@ impl<'a> Printer<'a> {
                     }
                     // Assigning a concrete type to a type-variable local
                     // needs the (erased-away) cast back in source form.
-                    let need_cast = matches!(
-                        &info.ty,
-                        TypeRef::G(crate::types::GenericType::TypeVar(_))
-                    ) && e.type_ref() != info.ty;
+                    let need_cast =
+                        matches!(&info.ty, TypeRef::G(crate::types::GenericType::TypeVar(_)))
+                            && e.type_ref() != info.ty;
                     if need_cast {
                         line.push('(');
                         line.push_str(&self.type_name(&info.ty));
@@ -468,7 +504,9 @@ impl<'a> Printer<'a> {
                     // `() -> (T[]) new Object[]{..}` — jdk17 Collectors).
                     if let (Some(TypeRef::G(g)), Expr::Lambda(l)) = (&self.ret_sam, e) {
                         self.lambda_sam_ret = match g {
-                            crate::types::GenericType::Class(_) => self.sam_ret_cast(g, &l.sam_name),
+                            crate::types::GenericType::Class(_) => {
+                                self.sam_ret_cast(g, &l.sam_name)
+                            }
                             crate::types::GenericType::Array(_) => Some(TypeRef::G(g.clone())),
                             _ => None,
                         };
@@ -486,7 +524,11 @@ impl<'a> Printer<'a> {
                 line.push(';');
                 self.line(&line);
             }
-            Stmt::If { cond, then_stmt, else_stmt } => {
+            Stmt::If {
+                cond,
+                then_stmt,
+                else_stmt,
+            } => {
                 self.print_if(cond, then_stmt, else_stmt.as_deref(), "");
             }
             Stmt::While { cond, body } => {
@@ -509,7 +551,12 @@ impl<'a> Printer<'a> {
                 tail.push_str(");");
                 self.line(&tail);
             }
-            Stmt::For { init, cond, update, body } => {
+            Stmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
                 let mut head = String::from("for (");
                 for (i, s) in init.iter().enumerate() {
                     if i > 0 {
@@ -531,7 +578,12 @@ impl<'a> Printer<'a> {
                 head.push(')');
                 self.block_stmt(&head, body);
             }
-            Stmt::ForEach { var, iterable, is_array, body } => {
+            Stmt::ForEach {
+                var,
+                iterable,
+                is_array,
+                body,
+            } => {
                 let _ = is_array;
                 let info = self.vt.var(*var);
                 let mut head = String::from("for (");
@@ -543,7 +595,12 @@ impl<'a> Printer<'a> {
                 head.push(')');
                 self.block_stmt(&head, body);
             }
-            Stmt::Switch { selector, cases, default, on_string } => {
+            Stmt::Switch {
+                selector,
+                cases,
+                default,
+                on_string,
+            } => {
                 let _ = on_string;
                 let mut head = String::from("switch (");
                 self.expr(selector, 1, &mut head);
@@ -634,7 +691,11 @@ impl<'a> Printer<'a> {
                 self.indent -= 1;
                 self.line("}");
             }
-            Stmt::Try { body, catches, finally } => {
+            Stmt::Try {
+                body,
+                catches,
+                finally,
+            } => {
                 self.line("try {");
                 self.indent += 1;
                 self.stmt(body);
@@ -643,12 +704,18 @@ impl<'a> Printer<'a> {
                     let exc_name = if c.exc.is_empty() {
                         "Throwable".to_string()
                     } else {
-                        c.exc.iter().map(|e| self.shorten(e)).collect::<Vec<_>>().join(" | ")
+                        c.exc
+                            .iter()
+                            .map(|e| self.shorten(e))
+                            .collect::<Vec<_>>()
+                            .join(" | ")
                     };
                     let var_name = if c.var == u32::MAX {
                         "ignored".to_string()
                     } else {
-                        c.var_name.clone().unwrap_or_else(|| self.vt.var(c.var).name.clone())
+                        c.var_name
+                            .clone()
+                            .unwrap_or_else(|| self.vt.var(c.var).name.clone())
                     };
                     self.line(&format!("}} catch ({} {}) {{", exc_name, var_name));
                     self.indent += 1;
@@ -663,7 +730,12 @@ impl<'a> Printer<'a> {
                 }
                 self.line("}");
             }
-            Stmt::TryWithResources { resources, body, catches, finally } => {
+            Stmt::TryWithResources {
+                resources,
+                body,
+                catches,
+                finally,
+            } => {
                 let mut res: Vec<String> = Vec::new();
                 for r in resources {
                     if let Stmt::LocalDef { var, init, .. } = r {
@@ -708,12 +780,18 @@ impl<'a> Printer<'a> {
                     let exc_name = if c.exc.is_empty() {
                         "Throwable".to_string()
                     } else {
-                        c.exc.iter().map(|e| self.shorten(e)).collect::<Vec<_>>().join(" | ")
+                        c.exc
+                            .iter()
+                            .map(|e| self.shorten(e))
+                            .collect::<Vec<_>>()
+                            .join(" | ")
                     };
                     let var_name = if c.var == u32::MAX {
                         "ignored".to_string()
                     } else {
-                        c.var_name.clone().unwrap_or_else(|| self.vt.var(c.var).name.clone())
+                        c.var_name
+                            .clone()
+                            .unwrap_or_else(|| self.vt.var(c.var).name.clone())
                     };
                     self.line(&format!("}} catch ({} {}) {{", exc_name, var_name));
                     self.indent += 1;
@@ -844,7 +922,11 @@ impl<'a> Printer<'a> {
         self.stmt(then_stmt);
         self.indent -= 1;
         match else_stmt {
-            Some(Stmt::If { cond: c2, then_stmt: t2, else_stmt: e2 }) => {
+            Some(Stmt::If {
+                cond: c2,
+                then_stmt: t2,
+                else_stmt: e2,
+            }) => {
                 self.print_if(c2, t2, e2.as_deref(), "} else ");
             }
             Some(other) => {
@@ -932,11 +1014,7 @@ impl<'a> Printer<'a> {
                 // instead of the diamond.
                 let explicit = match ty {
                     TypeRef::G(crate::types::GenericType::Class(cs))
-                        if cs
-                            .parts
-                            .last()
-                            .map(|p| !p.args.is_empty())
-                            .unwrap_or(false)
+                        if cs.parts.last().map(|p| !p.args.is_empty()).unwrap_or(false)
                             && crate::typeutil::classsig_internal(cs) == *cls =>
                     {
                         let rendered: Vec<String> = cs
@@ -970,7 +1048,8 @@ impl<'a> Printer<'a> {
                     // target through the `?:` and infers <Object,Object>
                     // (jdk7 HashSet.readObject map-ternary 不兼容的类型).
                     // Raw is unchecked but always compilable.
-                    None if no_diamond || args_wildcard
+                    None if no_diamond
+                        || args_wildcard
                         || (self.in_cond && self.ctx.source_level() < 52) =>
                     {
                         "".into()
@@ -998,10 +1077,8 @@ impl<'a> Printer<'a> {
                     // (jdk11 BitSet$1BitSetSpliterator(BitSet,int,int,int,
                     // boolean) — the boolean formal rendered its arg `0`).
                     let internal = self.ctx.local_class_internal(local).or_else(|| {
-                        let tail =
-                            self.ctx.class_name().rsplit('$').next().unwrap_or("");
-                        let simple =
-                            tail.trim_start_matches(|c: char| c.is_ascii_digit());
+                        let tail = self.ctx.class_name().rsplit('$').next().unwrap_or("");
+                        let simple = tail.trim_start_matches(|c: char| c.is_ascii_digit());
                         if !simple.is_empty() && simple == local {
                             return Some(self.ctx.class_name().to_string());
                         }
@@ -1115,7 +1192,12 @@ impl<'a> Printer<'a> {
                     out.push(')');
                 }
             }
-            Expr::NewArray { elem, dims, trailing_dims, init } => {
+            Expr::NewArray {
+                elem,
+                dims,
+                trailing_dims,
+                init,
+            } => {
                 out.push_str("new ");
                 out.push_str(&self.type_name(elem));
                 match init {
@@ -1173,7 +1255,13 @@ impl<'a> Printer<'a> {
                     out.push(']');
                 }
             }
-            Expr::Field { owner, cls, name, is_static, .. } => {
+            Expr::Field {
+                owner,
+                cls,
+                name,
+                is_static,
+                ..
+            } => {
                 // javac reserves `$assertionsDisabled`; the declaration and
                 // all references are emitted under a private alias.
                 let name: &str = if name == "$assertionsDisabled" {
@@ -1267,18 +1355,12 @@ impl<'a> Printer<'a> {
                             }
                             !shadow
                         };
-                    if !enclosing_static
-                        && (cls != &self.ctx.class_name() || shadowed_by_local)
-                    {
+                    if !enclosing_static && (cls != &self.ctx.class_name() || shadowed_by_local) {
                         out.push_str(&self.shorten(cls));
                         out.push('.');
                     }
                     out.push_str(name);
-                } else if self.private_super_field(
-                    cls,
-                    name,
-                    &Expr::This,
-                ) {
+                } else if self.private_super_field(cls, name, &Expr::This) {
                     out.push_str("((");
                     out.push_str(&self.shorten(cls));
                     out.push_str(") this).");
@@ -1288,7 +1370,18 @@ impl<'a> Printer<'a> {
                     out.push_str(name);
                 }
             }
-            Expr::Method { owner, cls, name, desc, args, is_static, is_special, is_super, type_args, .. } => {
+            Expr::Method {
+                owner,
+                cls,
+                name,
+                desc,
+                args,
+                is_static,
+                is_special,
+                is_super,
+                type_args,
+                ..
+            } => {
                 // Signature-polymorphic calls need the descriptor return cast
                 // in source form (see classdec::polymorphic_ret_cast) — except
                 // at the root of an expression statement, where the bare call
@@ -1322,7 +1415,9 @@ impl<'a> Printer<'a> {
                         match enclosing {
                             Some(enc)
                                 if self.ctx.class_has_this0(cls)
-                                    && self.ctx.is_subtype_of(&args[0].type_ref().erased(), &enc) =>
+                                    && self
+                                        .ctx
+                                        .is_subtype_of(&args[0].type_ref().erased(), &enc) =>
                             {
                                 Some(enc)
                             }
@@ -1378,9 +1473,7 @@ impl<'a> Printer<'a> {
                         self.args_delegation(args, &desc.args, out);
                     } else {
                         match self.ctor_param_types(cls, 0, args.len(), args) {
-                            Some(pt) if pt.len() == args.len() => {
-                                self.args_typed(args, &pt, out)
-                            }
+                            Some(pt) if pt.len() == args.len() => self.args_typed(args, &pt, out),
                             _ => self.args(args, out),
                         }
                     }
@@ -1509,9 +1602,7 @@ impl<'a> Printer<'a> {
                         if self.ctx.is_generic_call(e) {
                             if let Some((formals, mtvars)) = self.ctx.generic_call_formals(e) {
                                 if formals.len() == args.len() {
-                                    for (i, (a, f)) in
-                                        args.iter().zip(formals.iter()).enumerate()
-                                    {
+                                    for (i, (a, f)) in args.iter().zip(formals.iter()).enumerate() {
                                         // A raw-SAM-cast wrapper still
                                         // exposes the lambda (the overload
                                         // disambiguation cast; the primed
@@ -1566,7 +1657,11 @@ impl<'a> Printer<'a> {
                 // `(T) (Serializable) lambda` is invalid Java: the source
                 // form of a serializable-lambda cast is the intersection
                 // `(T & Serializable) lambda`.
-                if let Expr::Cast { ty: inner_ty, e: inner_e } = &**e {
+                if let Expr::Cast {
+                    ty: inner_ty,
+                    e: inner_e,
+                } = &**e
+                {
                     let is_serializable = |t: &crate::ir::expr::TypeRef| {
                         t.erased() == crate::types::JavaType::Object("java/io/Serializable".into())
                     };
@@ -1657,9 +1752,7 @@ impl<'a> Printer<'a> {
                 };
                 let l_bool = lt == JavaType::Boolean;
                 let l_boolish = l_bool || self.bool_ish_vt(l);
-                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::RefEq | BinOp::RefNe)
-                    && l_boolish
-                {
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::RefEq | BinOp::RefNe) && l_boolish {
                     if let Expr::Const(ConstVal::Int(n)) = &**r {
                         let polarity = matches!(op, BinOp::Eq | BinOp::RefEq);
                         let want_true = (*n != 0) == polarity;
@@ -1772,7 +1865,9 @@ impl<'a> Printer<'a> {
                 out.push_str(if *delta > 0 { "++" } else { "--" });
             }
             Expr::Lambda(l) => self.lambda(l, out),
-            Expr::AnonNew { base, args, body, .. } => {
+            Expr::AnonNew {
+                base, args, body, ..
+            } => {
                 out.push_str("new ");
                 let base_s = self.type_name(base);
                 out.push_str(&base_s);
@@ -1841,7 +1936,12 @@ impl<'a> Printer<'a> {
                     out.push_str("\"\"");
                 }
             }
-            Expr::Invokedynamic { name, args, bsm_text, .. } => {
+            Expr::Invokedynamic {
+                name,
+                args,
+                bsm_text,
+                ..
+            } => {
                 if name.starts_with('\u{0}') {
                     out.push_str("/*bad-cmp*/0");
                 } else {
@@ -1931,7 +2031,12 @@ impl<'a> Printer<'a> {
         }
     }
 
-    fn args_typed(&mut self, args: &[Expr], param_types: &[crate::types::JavaType], out: &mut String) {
+    fn args_typed(
+        &mut self,
+        args: &[Expr],
+        param_types: &[crate::types::JavaType],
+        out: &mut String,
+    ) {
         self.args_typed_sam(args, param_types, &[], out)
     }
 
@@ -2040,7 +2145,9 @@ impl<'a> Printer<'a> {
                     let cap = &l.captures[0];
                     let func_ty = match cap {
                         Expr::Lambda(l2) => Some(l2.sam_cls.clone()),
-                        Expr::Cast { ty, e } if matches!(**e, Expr::Lambda(_)) => Some(ty.erased().to_descriptor()),
+                        Expr::Cast { ty, e } if matches!(**e, Expr::Lambda(_)) => {
+                            Some(ty.erased().to_descriptor())
+                        }
                         _ => None,
                     };
                     if let Some(f) = func_ty {
@@ -2120,7 +2227,9 @@ impl<'a> Printer<'a> {
                 out.push_str(" -> ");
                 let sam_wrap = self.lambda_sam_ret.take();
                 match nested {
-                    Some(MethodBody { mut body, mut vt, .. }) => {
+                    Some(MethodBody {
+                        mut body, mut vt, ..
+                    }) => {
                         // Single-return body → expression lambda.
                         let mut single_expr = match &body {
                             Stmt::Return(Some(e)) => Some(e.clone()),
@@ -2135,19 +2244,25 @@ impl<'a> Printer<'a> {
                         // under `(Function<I,R>)` fails inference without
                         // `(R) i`.
                         fn sam_ok(t: &TypeRef, e: &Expr) -> bool {
-                            !matches!(e, Expr::Cast { .. } | Expr::Const(_))
-                                && e.type_ref() != *t
+                            !matches!(e, Expr::Cast { .. } | Expr::Const(_)) && e.type_ref() != *t
                         }
                         fn wrap_returns(s: &mut Stmt, t: &TypeRef) {
                             match s {
                                 Stmt::Return(Some(e)) => {
                                     if sam_ok(t, e) {
                                         let v = std::mem::replace(e, Expr::This);
-                                        *e = Expr::Cast { ty: t.clone(), e: Box::new(v) };
+                                        *e = Expr::Cast {
+                                            ty: t.clone(),
+                                            e: Box::new(v),
+                                        };
                                     }
                                 }
                                 Stmt::Block(v) => v.iter_mut().for_each(|x| wrap_returns(x, t)),
-                                Stmt::If { then_stmt, else_stmt, .. } => {
+                                Stmt::If {
+                                    then_stmt,
+                                    else_stmt,
+                                    ..
+                                } => {
                                     wrap_returns(then_stmt, t);
                                     if let Some(x) = else_stmt {
                                         wrap_returns(x, t);
@@ -2172,7 +2287,11 @@ impl<'a> Printer<'a> {
                                         wrap_returns(d, t);
                                     }
                                 }
-                                Stmt::Try { body, catches, finally } => {
+                                Stmt::Try {
+                                    body,
+                                    catches,
+                                    finally,
+                                } => {
                                     wrap_returns(body, t);
                                     for c in catches.iter_mut() {
                                         wrap_returns(&mut c.body, t);
@@ -2188,7 +2307,10 @@ impl<'a> Printer<'a> {
                             if let Some(e) = &mut single_expr {
                                 if sam_ok(t, e) {
                                     let v = std::mem::replace(e, Expr::This);
-                                    *e = Expr::Cast { ty: t.clone(), e: Box::new(v) };
+                                    *e = Expr::Cast {
+                                        ty: t.clone(),
+                                        e: Box::new(v),
+                                    };
                                 } else if let TypeRef::G(_) = t {
                                     // The body already carries the erasure
                                     // checkcast: retype it to the generic
@@ -2253,7 +2375,8 @@ impl<'a> Printer<'a> {
                                         }
                                     }
                                 }
-                                let crate::types::JavaType::Object(e0) = e.type_ref().erased() else {
+                                let crate::types::JavaType::Object(e0) = e.type_ref().erased()
+                                else {
                                     return false;
                                 };
                                 if &e0 == t {
@@ -2318,9 +2441,15 @@ impl<'a> Printer<'a> {
                                         }
                                     }
                                 }
-                                if !upgraded && sam_ok(&want, e) && upcast_ok(e, &inst.ret, self.ctx) {
+                                if !upgraded
+                                    && sam_ok(&want, e)
+                                    && upcast_ok(e, &inst.ret, self.ctx)
+                                {
                                     let v = std::mem::replace(e, Expr::This);
-                                    *e = Expr::Cast { ty: want, e: Box::new(v) };
+                                    *e = Expr::Cast {
+                                        ty: want,
+                                        e: Box::new(v),
+                                    };
                                 }
                             }
                         }
@@ -2335,14 +2464,9 @@ impl<'a> Printer<'a> {
                         // method-level twin is handled by
                         // disambiguate_lambda_locals.
                         {
-                            let mut outer_names: std::collections::HashSet<&str> = self
-                                .vt
-                                .vars
-                                .iter()
-                                .map(|v| v.name.as_str())
-                                .collect();
-                            outer_names
-                                .extend(self.outer_names.iter().map(|n| n.as_str()));
+                            let mut outer_names: std::collections::HashSet<&str> =
+                                self.vt.vars.iter().map(|v| v.name.as_str()).collect();
+                            outer_names.extend(self.outer_names.iter().map(|n| n.as_str()));
                             let mut used: std::collections::HashSet<String> =
                                 vt.vars.iter().map(|v| v.name.clone()).collect();
                             for v in vt.vars.iter_mut() {
@@ -2353,8 +2477,7 @@ impl<'a> Printer<'a> {
                                 let mut k = 1;
                                 loop {
                                     let cand = format!("{}${}", base, k);
-                                    if !used.contains(&cand)
-                                        && !outer_names.contains(cand.as_str())
+                                    if !used.contains(&cand) && !outer_names.contains(cand.as_str())
                                     {
                                         used.insert(cand.clone());
                                         v.name = cand;
@@ -2467,7 +2590,6 @@ impl<'a> Printer<'a> {
         self.ctx.sam_ret_cast(g, sam_name)
     }
 
-
     /// `<>` when `new cls(...)` should carry a diamond: the class is
     /// generic (class-level Signature with type params) and THIS file is
     /// Java 7+. A bare generic new compiles under old-style inference
@@ -2523,7 +2645,9 @@ impl<'a> Printer<'a> {
         // cls must be a strict superclass of the owner's compile-time type.
         let mut cur = owner_ct;
         for _ in 0..64 {
-            let Some(sup) = self.ctx.super_name(&cur) else { return false };
+            let Some(sup) = self.ctx.super_name(&cur) else {
+                return false;
+            };
             if sup == cls {
                 return true;
             }
@@ -2555,7 +2679,10 @@ impl<'a> Printer<'a> {
         }
         let want = format!(
             "({}){}",
-            desc.args.iter().map(|t| t.to_descriptor()).collect::<String>(),
+            desc.args
+                .iter()
+                .map(|t| t.to_descriptor())
+                .collect::<String>(),
             desc.ret.to_descriptor()
         );
         let Some(acc) = self.ctx.method_flags(cls, name, &want) else {
@@ -2578,10 +2705,8 @@ impl<'a> Printer<'a> {
         if matches!(e, Expr::Cast { .. } | Expr::Const(_)) {
             return false;
         }
-        let (
-            crate::types::JavaType::Object(from),
-            crate::types::JavaType::Object(to),
-        ) = (e.type_ref().erased(), ty.erased())
+        let (crate::types::JavaType::Object(from), crate::types::JavaType::Object(to)) =
+            (e.type_ref().erased(), ty.erased())
         else {
             return false;
         };
@@ -2613,12 +2738,17 @@ impl<'a> Printer<'a> {
         let dot_safe = |simple: &str| -> bool {
             simple.split('$').skip(1).all(|seg| {
                 !seg.is_empty()
-                    && seg.chars().next().map(|c| !c.is_ascii_digit()).unwrap_or(false)
+                    && seg
+                        .chars()
+                        .next()
+                        .map(|c| !c.is_ascii_digit())
+                        .unwrap_or(false)
             })
         };
         let simple_here = internal.rsplit('/').next().unwrap_or(internal).to_string();
-        let keep_dollar_pool =
-            internal.contains('$') && self.ctx.has_class(internal) && self.ctx.find_outer(internal).is_none();
+        let keep_dollar_pool = internal.contains('$')
+            && self.ctx.has_class(internal)
+            && self.ctx.find_outer(internal).is_none();
         let keep_dollar = keep_dollar_pool || (internal.contains('$') && !dot_safe(&simple_here));
         // Anonymous class types (all-digit last segment) have no source
         // name: print the base interface/superclass instead.
@@ -2649,7 +2779,10 @@ impl<'a> Printer<'a> {
                 let mut segs = internal.split('$');
                 if let Some(first) = segs.next() {
                     let rest: Vec<&str> = segs.collect();
-                    if rest.iter().any(|r| r.starts_with(|c: char| c.is_ascii_digit())) {
+                    if rest
+                        .iter()
+                        .any(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+                    {
                         // Local/synthetic class (digit-led segment): javac
                         // encodes a method-local class as `Outer$1Name`; its
                         // source name is the digit prefix stripped, declared
@@ -2699,7 +2832,11 @@ impl<'a> Printer<'a> {
             let simple = if keep_dollar {
                 internal.rsplit('/').next().unwrap_or(internal).to_string()
             } else {
-                internal.rsplit('/').next().unwrap_or(internal).replace('$', ".")
+                internal
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(internal)
+                    .replace('$', ".")
             };
             let first = simple.split('.').next().unwrap_or(simple.as_str());
             if !shadowed(first) {
@@ -2741,9 +2878,7 @@ impl<'a> Printer<'a> {
                 // parts [errno_h, shared]; rejoin and, when the pool
                 // proves the class is NOT nested, render the binary name
                 // through shorten (same-package simple form keeps the $).
-                if cs.parts.len() > 1
-                    && cs.parts.iter().skip(1).all(|p| p.args.is_empty())
-                {
+                if cs.parts.len() > 1 && cs.parts.iter().skip(1).all(|p| p.args.is_empty()) {
                     let joined = cs
                         .parts
                         .iter()
@@ -2762,7 +2897,11 @@ impl<'a> Printer<'a> {
                 }
                 let mut s = String::new();
                 if !cs.package.is_empty() {
-                    let full = format!("{}/{}", cs.package, cs.parts.first().map(|p| p.name.as_str()).unwrap_or(""));
+                    let full = format!(
+                        "{}/{}",
+                        cs.package,
+                        cs.parts.first().map(|p| p.name.as_str()).unwrap_or("")
+                    );
                     s.push_str(&self.shorten(&full));
                 } else {
                     s.push_str(&cs.parts.first().map(|p| p.name.clone()).unwrap_or_default());
@@ -2780,7 +2919,12 @@ impl<'a> Printer<'a> {
                     }
                 }
                 for p in cs.parts.iter().skip(1) {
-                    let digit_led = p.name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                    let digit_led = p
+                        .name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false);
                     let stripped = p.name.trim_start_matches(|c: char| c.is_ascii_digit());
                     if digit_led && !stripped.is_empty() && p.args.is_empty() {
                         // javac's local-class encoding `Outer$1Name`: the
@@ -2905,7 +3049,11 @@ pub fn format_float(v: f64, is_float: bool) -> String {
     // inside java.lang.Double/Float themselves a field reference would be
     // a self-reference initializing the very field being printed.
     if v.is_nan() {
-        return if is_float { "(0.0f / 0.0f)".into() } else { "(0.0 / 0.0)".into() };
+        return if is_float {
+            "(0.0f / 0.0f)".into()
+        } else {
+            "(0.0 / 0.0)".into()
+        };
     }
     if v.is_infinite() {
         let one = if is_float { "1.0f" } else { "1.0" };
@@ -2924,7 +3072,6 @@ pub fn format_float(v: f64, is_float: bool) -> String {
     // double literal. But "inf"/"nan" handled above.
     format!("{}{}", s, suffix)
 }
-
 
 // ---------------------------------------------------------------------------
 // Unreachable-code truncation (final statement tree)
@@ -2952,10 +3099,11 @@ fn tree_has_dead_end(s: &Stmt) -> bool {
             }
             false
         }
-        Stmt::If { then_stmt, else_stmt, .. } => {
-            tree_has_dead_end(then_stmt)
-                || else_stmt.as_deref().is_some_and(tree_has_dead_end)
-        }
+        Stmt::If {
+            then_stmt,
+            else_stmt,
+            ..
+        } => tree_has_dead_end(then_stmt) || else_stmt.as_deref().is_some_and(tree_has_dead_end),
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => tree_has_dead_end(body),
         Stmt::For { init, body, .. } => {
             init.iter().any(tree_has_dead_end) || tree_has_dead_end(body)
@@ -2965,12 +3113,22 @@ fn tree_has_dead_end(s: &Stmt) -> bool {
             cases.iter().any(|c| c.body.iter().any(tree_has_dead_end))
                 || default.as_deref().is_some_and(tree_has_dead_end)
         }
-        Stmt::Try { body, catches, finally } => {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        } => {
             tree_has_dead_end(body)
                 || catches.iter().any(|c| tree_has_dead_end(&c.body))
                 || finally.as_deref().is_some_and(tree_has_dead_end)
         }
-        Stmt::TryWithResources { resources, body, catches, finally, .. } => {
+        Stmt::TryWithResources {
+            resources,
+            body,
+            catches,
+            finally,
+            ..
+        } => {
             resources.iter().any(tree_has_dead_end)
                 || tree_has_dead_end(body)
                 || catches.iter().any(|c| tree_has_dead_end(&c.body))
@@ -2999,7 +3157,11 @@ fn truncate_dead_ends(s: &Stmt) -> Stmt {
             }
             Stmt::Block(out)
         }
-        Stmt::If { cond, then_stmt, else_stmt } => Stmt::If {
+        Stmt::If {
+            cond,
+            then_stmt,
+            else_stmt,
+        } => Stmt::If {
             cond: cond.clone(),
             then_stmt: Box::new(truncate_dead_ends(then_stmt)),
             else_stmt: else_stmt.as_deref().map(truncate_dead_ends).map(Box::new),
@@ -3012,19 +3174,34 @@ fn truncate_dead_ends(s: &Stmt) -> Stmt {
             body: Box::new(truncate_dead_ends(body)),
             cond: cond.clone(),
         },
-        Stmt::For { init, cond, update, body } => Stmt::For {
+        Stmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => Stmt::For {
             init: init.iter().map(truncate_dead_ends).collect(),
             cond: cond.clone(),
             update: update.clone(),
             body: Box::new(truncate_dead_ends(body)),
         },
-        Stmt::ForEach { var, iterable, is_array, body } => Stmt::ForEach {
+        Stmt::ForEach {
+            var,
+            iterable,
+            is_array,
+            body,
+        } => Stmt::ForEach {
             var: *var,
             iterable: iterable.clone(),
             is_array: *is_array,
             body: Box::new(truncate_dead_ends(body)),
         },
-        Stmt::Switch { selector, cases, default, on_string } => Stmt::Switch {
+        Stmt::Switch {
+            selector,
+            cases,
+            default,
+            on_string,
+        } => Stmt::Switch {
             selector: selector.clone(),
             cases: cases
                 .iter()
@@ -3040,7 +3217,11 @@ fn truncate_dead_ends(s: &Stmt) -> Stmt {
             default: default.as_deref().map(truncate_dead_ends).map(Box::new),
             on_string: *on_string,
         },
-        Stmt::Try { body, catches, finally } => Stmt::Try {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        } => Stmt::Try {
             body: Box::new(truncate_dead_ends(body)),
             catches: catches
                 .iter()
@@ -3053,22 +3234,25 @@ fn truncate_dead_ends(s: &Stmt) -> Stmt {
                 .collect(),
             finally: finally.as_deref().map(truncate_dead_ends).map(Box::new),
         },
-        Stmt::TryWithResources { resources, body, catches, finally } => {
-            Stmt::TryWithResources {
-                resources: resources.iter().map(truncate_dead_ends).collect(),
-                body: Box::new(truncate_dead_ends(body)),
-                catches: catches
-                    .iter()
-                    .map(|c| Catch {
-                        exc: c.exc.clone(),
-                        var: c.var,
-                        var_name: c.var_name.clone(),
-                        body: Box::new(truncate_dead_ends(&c.body)),
-                    })
-                    .collect(),
-                finally: finally.as_deref().map(truncate_dead_ends).map(Box::new),
-            }
-        }
+        Stmt::TryWithResources {
+            resources,
+            body,
+            catches,
+            finally,
+        } => Stmt::TryWithResources {
+            resources: resources.iter().map(truncate_dead_ends).collect(),
+            body: Box::new(truncate_dead_ends(body)),
+            catches: catches
+                .iter()
+                .map(|c| Catch {
+                    exc: c.exc.clone(),
+                    var: c.var,
+                    var_name: c.var_name.clone(),
+                    body: Box::new(truncate_dead_ends(&c.body)),
+                })
+                .collect(),
+            finally: finally.as_deref().map(truncate_dead_ends).map(Box::new),
+        },
         Stmt::Synchronized { lock, body } => Stmt::Synchronized {
             lock: lock.clone(),
             body: Box::new(truncate_dead_ends(body)),
@@ -3117,7 +3301,11 @@ fn has_break_exiting(s: &Stmt, lbl: Option<&str>, depth: usize) -> bool {
         Stmt::Continue(_) | Stmt::Return(_) | Stmt::Throw(_) => false,
         Stmt::Goto(_) => true,
         Stmt::Block(v) => v.iter().any(|x| has_break_exiting(x, lbl, depth)),
-        Stmt::If { then_stmt, else_stmt, .. } => {
+        Stmt::If {
+            then_stmt,
+            else_stmt,
+            ..
+        } => {
             has_break_exiting(then_stmt, lbl, depth)
                 || else_stmt
                     .as_deref()
@@ -3137,10 +3325,21 @@ fn has_break_exiting(s: &Stmt, lbl: Option<&str>, depth: usize) -> bool {
                     .map(|d| has_break_exiting(d, lbl, depth + 1))
                     .unwrap_or(false)
         }
-        Stmt::Try { body, catches, finally }
-        | Stmt::TryWithResources { body, catches, finally, .. } => {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        }
+        | Stmt::TryWithResources {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
             has_break_exiting(body, lbl, depth)
-                || catches.iter().any(|c| has_break_exiting(&c.body, lbl, depth))
+                || catches
+                    .iter()
+                    .any(|c| has_break_exiting(&c.body, lbl, depth))
                 || finally
                     .as_deref()
                     .map(|f| has_break_exiting(f, lbl, depth))
@@ -3161,4 +3360,3 @@ fn has_break_exiting(s: &Stmt, lbl: Option<&str>, depth: usize) -> bool {
         _ => true,
     }
 }
-

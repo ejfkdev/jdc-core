@@ -82,9 +82,27 @@ impl VarTable {
         self.add(slot, name, ty, false, 0, u16::MAX, true)
     }
 
-    fn add(&mut self, slot: u16, name: String, ty: TypeRef, is_param: bool, rs: u16, re: u16, synth: bool) -> u32 {
+    fn add(
+        &mut self,
+        slot: u16,
+        name: String,
+        ty: TypeRef,
+        is_param: bool,
+        rs: u16,
+        re: u16,
+        synth: bool,
+    ) -> u32 {
         let id = self.vars.len() as u32;
-        self.vars.push(VarInfo { id, slot, name, ty, is_param, range_start: rs, range_end: re, synthetic_name: synth });
+        self.vars.push(VarInfo {
+            id,
+            slot,
+            name,
+            ty,
+            is_param,
+            range_start: rs,
+            range_end: re,
+            synthetic_name: synth,
+        });
         while self.by_slot.len() <= slot as usize {
             self.by_slot.push(Vec::new());
         }
@@ -112,9 +130,10 @@ impl VarTable {
         for (rs, _, id) in segs {
             if *rs > pc
                 && *rs - pc <= 8
-                && !self.handler_starts.iter().any(|h| {
-                    *rs == *h || *rs == h + 1 || *rs == h + 2
-                })
+                && !self
+                    .handler_starts
+                    .iter()
+                    .any(|h| *rs == *h || *rs == h + 1 || *rs == h + 2)
             {
                 return Some(*id);
             }
@@ -139,7 +158,10 @@ impl VarTable {
     }
 
     pub fn vars_on_slot(&self, slot: u16) -> &[(u16, u16, u32)] {
-        self.by_slot.get(slot as usize).map(|v| v.as_slice()).unwrap_or(&[])
+        self.by_slot
+            .get(slot as usize)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn var(&self, id: u32) -> &VarInfo {
@@ -169,8 +191,7 @@ pub fn sig_type_at(
     slot: u16,
     base: &JavaType,
 ) -> Option<TypeRef> {
-    lvtt
-        .iter()
+    lvtt.iter()
         .find(|(s, _, _, sl)| *s == start && *sl == slot)
         .and_then(|(_, _, sig, _)| crate::types::parse_field_signature(sig).map(TypeRef::G))
         // Reject signatures that cannot describe the descriptor type (a
@@ -201,6 +222,9 @@ pub fn sig_matches_base(tr: &TypeRef, base: &JavaType) -> bool {
 pub fn unknown_ref_type() -> TypeRef {
     TypeRef::G(GenericType::Class(crate::types::ClassSig {
         package: "java/lang".into(),
-        parts: vec![crate::types::ClassSigPart { name: "Object".into(), args: vec![] }],
+        parts: vec![crate::types::ClassSigPart {
+            name: "Object".into(),
+            args: vec![],
+        }],
     }))
 }

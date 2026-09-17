@@ -244,7 +244,11 @@ impl<'a> Converter<'a> {
             Region::Basic { block } => {
                 self.cur_block = block;
                 if crate::dbg_flag!("JCDC_DBG_BLOCKS") {
-                    eprintln!("conv Basic {} ({} stmts)", block, self.results[block].stmts.len());
+                    eprintln!(
+                        "conv Basic {} ({} stmts)",
+                        block,
+                        self.results[block].stmts.len()
+                    );
                 }
                 self.block_stmts(block)
             }
@@ -267,10 +271,7 @@ impl<'a> Converter<'a> {
             Region::Seq(v) => {
                 let mut out = Vec::new();
                 let n = v.len();
-                let heads: Vec<usize> = v
-                    .iter()
-                    .map(crate::structure::region_head_block)
-                    .collect();
+                let heads: Vec<usize> = v.iter().map(crate::structure::region_head_block).collect();
                 let prev_copies: Vec<Option<usize>> = (0..n)
                     .map(|k| {
                         if k > 0 {
@@ -305,7 +306,14 @@ impl<'a> Converter<'a> {
                 }
                 Stmt::Block(out)
             }
-            Region::If { block, cond, then_r, else_r, follow, ternary } => {
+            Region::If {
+                block,
+                cond,
+                then_r,
+                else_r,
+                follow,
+                ternary,
+            } => {
                 self.cur_block = block;
                 let mut head = self.block_stmts_no_term(block);
                 if let Some((_tv, _fv)) = ternary {
@@ -331,7 +339,11 @@ impl<'a> Converter<'a> {
                     let if_stmt = Stmt::If {
                         cond,
                         then_stmt: Box::new(then_stmt),
-                        else_stmt: if else_stmt.is_empty_block() { None } else { Some(Box::new(else_stmt)) },
+                        else_stmt: if else_stmt.is_empty_block() {
+                            None
+                        } else {
+                            Some(Box::new(else_stmt))
+                        },
                     };
                     head.push(if_stmt);
                 }
@@ -341,7 +353,12 @@ impl<'a> Converter<'a> {
                     Stmt::Block(head)
                 }
             }
-            Region::Loop { header, body, members, exits } => {
+            Region::Loop {
+                header,
+                body,
+                members,
+                exits,
+            } => {
                 let label = self.next_label();
                 self.loops.push(LoopCtx {
                     header,
@@ -357,24 +374,40 @@ impl<'a> Converter<'a> {
                         Stmt::While { .. } => "While".to_string(),
                         Stmt::DoWhile { .. } => "DoWhile".to_string(),
                         Stmt::For { .. } => "For".to_string(),
-                        Stmt::Block(b) => format!("Block{}[{}]", b.len(), b.iter().map(|x| match x {
-                            Stmt::DoWhile { .. } => "DoWhile",
-                            Stmt::While { .. } => "While",
-                            Stmt::Break(_) => "Break",
-                            Stmt::Return(_) => "Return",
-                            _ => "_",
-                        }).collect::<Vec<_>>().join(",")),
+                        Stmt::Block(b) => format!(
+                            "Block{}[{}]",
+                            b.len(),
+                            b.iter()
+                                .map(|x| match x {
+                                    Stmt::DoWhile { .. } => "DoWhile",
+                                    Stmt::While { .. } => "While",
+                                    Stmt::Break(_) => "Break",
+                                    Stmt::Return(_) => "Return",
+                                    _ => "_",
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
                         Stmt::Labeled { .. } => "Labeled".to_string(),
                         _ => "Other".to_string(),
                     };
                     eprintln!("CLASSIFY-OUT header={} -> {}", header, kind);
                 }
                 if self.used_labels.contains(&label) {
-                    st = Stmt::Labeled { label, body: Box::new(st) };
+                    st = Stmt::Labeled {
+                        label,
+                        body: Box::new(st),
+                    };
                 }
                 st
             }
-            Region::Switch { block, selector, cases, default, follow } => {
+            Region::Switch {
+                block,
+                selector,
+                cases,
+                default,
+                follow,
+            } => {
                 self.cur_block = block;
                 let sw_label = self.next_label();
                 self.switches.push(SwitchCtx {
@@ -404,7 +437,10 @@ impl<'a> Converter<'a> {
                     on_string: false,
                 };
                 if self.used_labels.contains(&sw_label) {
-                    sw = Stmt::Labeled { label: sw_label, body: Box::new(sw) };
+                    sw = Stmt::Labeled {
+                        label: sw_label,
+                        body: Box::new(sw),
+                    };
                 }
                 head.push(sw);
                 if head.len() == 1 {
@@ -413,7 +449,11 @@ impl<'a> Converter<'a> {
                     Stmt::Block(head)
                 }
             }
-            Region::Try { group_idx, body, catches } => {
+            Region::Try {
+                group_idx,
+                body,
+                catches,
+            } => {
                 let mut body_stmt = self.conv(*body);
                 // Natural exits of the try body / handlers jump to the block
                 // right after the try span; that is structured fallthrough.
@@ -431,14 +471,25 @@ impl<'a> Converter<'a> {
                         body: Box::new(s),
                     });
                 }
-                Stmt::Try { body: Box::new(body_stmt), catches: catch_stmts, finally: None }
+                Stmt::Try {
+                    body: Box::new(body_stmt),
+                    catches: catch_stmts,
+                    finally: None,
+                }
             }
             Region::Goto { target } => {
                 if crate::dbg_flag!("JCDC_DBG_GOTO") {
-                    eprintln!("conv Goto target={} cur_block={} loops={:?} switches={} if_follows={:?}",
-                        target, self.cur_block,
-                        self.loops.iter().map(|l| (l.header, l.exits.len())).collect::<Vec<_>>(),
-                        self.switches.len(), self.if_follows);
+                    eprintln!(
+                        "conv Goto target={} cur_block={} loops={:?} switches={} if_follows={:?}",
+                        target,
+                        self.cur_block,
+                        self.loops
+                            .iter()
+                            .map(|l| (l.header, l.exits.len()))
+                            .collect::<Vec<_>>(),
+                        self.switches.len(),
+                        self.if_follows
+                    );
                 }
                 // A jump to an enclosing if's follow that TERMINATES
                 // (return/throw) can be inlined: the copy ends this path
@@ -456,10 +507,7 @@ impl<'a> Converter<'a> {
                 // duplication); a genuine fall-out exit still breaks.
                 //
                 let inline_terminator = self.if_follows.contains(&target)
-                    && matches!(
-                        self.results[target].term,
-                        Term::Return(_) | Term::Throw(_)
-                    )
+                    && matches!(self.results[target].term, Term::Return(_) | Term::Throw(_))
                     && !self.tail_chain_writes_final(target);
                 if inline_terminator {
                     // Copy the WHOLE terminator chain: the target's own
@@ -529,16 +577,18 @@ impl<'a> Converter<'a> {
                         }
                         Jump::RawGoto(t) => {
                             if crate::dbg_flag!("JCDC_DBG_GOTO") {
-                                eprintln!("RAWGOTO t={} copied_tails={:?} if_follows={:?} last={}", t, self.copied_tails, self.if_follows, self.goto_is_last);
+                                eprintln!(
+                                    "RAWGOTO t={} copied_tails={:?} if_follows={:?} last={}",
+                                    t, self.copied_tails, self.if_follows, self.goto_is_last
+                                );
                             }
                             // A Goto region is always the last part of its
                             // walk, so the jump either falls through to the
                             // enclosing merge or must be inlined.
-                            let term_copy = matches!(
-                                self.results[t].term,
-                                Term::Return(_) | Term::Throw(_)
-                            ) && !self.tail_chain_writes_final(t)
-                            && !self.is_retry_loop_header(t);
+                            let term_copy =
+                                matches!(self.results[t].term, Term::Return(_) | Term::Throw(_))
+                                    && !self.tail_chain_writes_final(t)
+                                    && !self.is_retry_loop_header(t);
                             if term_copy {
                                 let mut cv = self.results[t].stmts.clone();
                                 match &self.results[t].term {
@@ -606,9 +656,10 @@ impl<'a> Converter<'a> {
                                         false
                                     })
                                     .unwrap_or(false)
-                                && (self.if_follows.iter().any(|f| {
-                                    self.cfg.blocks[t].succ.contains(f)
-                                }))
+                                && (self
+                                    .if_follows
+                                    .iter()
+                                    .any(|f| self.cfg.blocks[t].succ.contains(f)))
                             {
                                 // Statement-bearing target FIRST: eliding
                                 // (goto_is_last / expect / copy-tail) would
@@ -639,9 +690,10 @@ impl<'a> Converter<'a> {
                                 self.results[t].term,
                                 Term::Return(_) | Term::Throw(_)
                             ) && self.prev_copy.get() != Some(t)
-                                && (self.if_follows.iter().any(|f| {
-                                    self.cfg.blocks[t].succ.contains(f)
-                                }))
+                                && (self
+                                    .if_follows
+                                    .iter()
+                                    .any(|f| self.cfg.blocks[t].succ.contains(f)))
                             {
                                 // The jump re-enters an already-structured
                                 // block whose flow ends at an enclosing
@@ -690,7 +742,10 @@ impl<'a> Converter<'a> {
     /// Resolve a goto target against the scope stack.
     fn resolve_goto(&mut self, target: usize) -> Option<Jump> {
         // continue: innermost loop whose header == target
-        if let Some(i) = (0..self.loops.len()).rev().find(|&i| self.loops[i].header == target) {
+        if let Some(i) = (0..self.loops.len())
+            .rev()
+            .find(|&i| self.loops[i].header == target)
+        {
             let depth = self.loops.len() - 1 - i;
             return Some(if depth == 0 {
                 Jump::Continue(None)
@@ -755,12 +810,19 @@ impl<'a> Converter<'a> {
                 Jump::Break(Some(self.loops[li].label.clone()))
             });
         }
-        if let Some(si) = (0..self.switches.len()).rev().find(|&i| self.switches[i].follow == Some(target)) {
-            return Some(if si + 1 == self.switches.len() && self.loops.len() == self.switches[si].loops_depth {
-                Jump::Break(None)
-            } else {
-                Jump::Break(Some(self.switches[si].label.clone()))
-            });
+        if let Some(si) = (0..self.switches.len())
+            .rev()
+            .find(|&i| self.switches[i].follow == Some(target))
+        {
+            return Some(
+                if si + 1 == self.switches.len()
+                    && self.loops.len() == self.switches[si].loops_depth
+                {
+                    Jump::Break(None)
+                } else {
+                    Jump::Break(Some(self.switches[si].label.clone()))
+                },
+            );
         }
         // Natural flow to the enclosing if's merge point: no statement.
         // Only the INNERMOST open follow qualifies — eliding a jump to an
@@ -802,12 +864,9 @@ impl<'a> Converter<'a> {
             // forward code — continuing there would skip it).
             let mut via_label: Option<Option<String>> = None;
             if self.results[target].stmts.is_empty() {
-                if let Some(i) = (0..self.loops.len())
-                    .rev()
-                    .find(|&i| {
-                        crate::structure::can_reach_cfg(self.cfg, target, self.loops[i].header, 4096)
-                    })
-                {
+                if let Some(i) = (0..self.loops.len()).rev().find(|&i| {
+                    crate::structure::can_reach_cfg(self.cfg, target, self.loops[i].header, 4096)
+                }) {
                     let depth = self.loops.len() - 1 - i;
                     via_label = Some(if depth == 0 {
                         None
@@ -892,19 +951,17 @@ impl<'a> Converter<'a> {
                 return false;
             }
             match &self.results[x].term {
-                Term::Fallthrough | Term::Goto => {
-                    match self.cfg.blocks[x].succ.first() {
-                        Some(&n) => x = n,
-                        None => return false,
-                    }
-                }
+                Term::Fallthrough | Term::Goto => match self.cfg.blocks[x].succ.first() {
+                    Some(&n) => x = n,
+                    None => return false,
+                },
                 _ => return false,
             }
         }
         false
     }
 
-#[allow(dead_code)]
+    #[allow(dead_code)]
     fn postdominates(&self, a: usize, b: usize, universe: &HashSet<usize>) -> bool {
         // BFS from b avoiding a; if no exit block is reachable, a post-dominates.
         let mut seen = HashSet::new();
@@ -973,7 +1030,10 @@ impl<'a> Converter<'a> {
                             };
                         }
                         return Stmt::Block(vec![
-                            Stmt::DoWhile { body: Box::new(Stmt::Block(stmts)), cond: c },
+                            Stmt::DoWhile {
+                                body: Box::new(Stmt::Block(stmts)),
+                                cond: c,
+                            },
                             exit,
                         ]);
                     }
@@ -997,7 +1057,10 @@ impl<'a> Converter<'a> {
                 }
                 let taken_is_exit = ctx.exits.contains(&taken);
                 if crate::dbg_flag!("JCDC_DBG_LOOP") {
-                    eprintln!("CLASSIFY2 header={} taken={} fall={} exits={:?}", header, taken, fall, ctx.exits);
+                    eprintln!(
+                        "CLASSIFY2 header={} taken={} fall={} exits={:?}",
+                        header, taken, fall, ctx.exits
+                    );
                 }
                 if !taken_is_exit && !ctx.exits.contains(&fall) {
                     // Multi-block loop condition. The header's fallthrough
@@ -1052,7 +1115,10 @@ impl<'a> Converter<'a> {
                                         header, fall, taken, ctx.exits
                                     );
                                 }
-                                return Stmt::While { cond: combined, body: Box::new(body) };
+                                return Stmt::While {
+                                    cond: combined,
+                                    body: Box::new(body),
+                                };
                             }
                         }
                     }
@@ -1091,14 +1157,21 @@ impl<'a> Converter<'a> {
                     );
                 }
                 let inner = strip_trailing_continue(inner);
-                let while_cond = if taken_is_exit { negate(cond.clone()) } else { cond.clone() };
+                let while_cond = if taken_is_exit {
+                    negate(cond.clone())
+                } else {
+                    cond.clone()
+                };
                 let plain_exit = exit_stmts.is_empty()
                     || matches!(exit_stmts.as_slice(), [Stmt::Break(_)])
                     || matches!(exit_stmts.as_slice(), [Stmt::Block(b)] if b.is_empty());
                 if taken_is_exit && plain_exit {
                     match try_protected_dowhile(inner, &cond) {
                         Ok(dw) => dw,
-                        Err(inner) => Stmt::While { cond: while_cond, body: Box::new(inner) },
+                        Err(inner) => Stmt::While {
+                            cond: while_cond,
+                            body: Box::new(inner),
+                        },
                     }
                 } else if taken_is_exit {
                     // Exit branch runs statements before leaving:
@@ -1124,7 +1197,10 @@ impl<'a> Converter<'a> {
                     };
                     let mut v = vec![guard];
                     v.extend(stmt_to_vec(inner));
-                    Stmt::While { cond: Expr::Const(ConstVal::Int(1)), body: Box::new(Stmt::Block(v)) }
+                    Stmt::While {
+                        cond: Expr::Const(ConstVal::Int(1)),
+                        body: Box::new(Stmt::Block(v)),
+                    }
                 } else {
                     // Unusual orientation: the fallthrough side exits.
                     if exit_stmts.is_empty()
@@ -1134,13 +1210,19 @@ impl<'a> Converter<'a> {
                         // then-side was the exit scaffolding; body is `inner`
                         match try_protected_dowhile(inner, &cond) {
                             Ok(dw) => dw,
-                            Err(inner) => Stmt::While { cond: while_cond, body: Box::new(inner) },
+                            Err(inner) => Stmt::While {
+                                cond: while_cond,
+                                body: Box::new(inner),
+                            },
                         }
                     } else {
                         // then-side carries the body ending with the back
                         // edge; fallthrough exits.
                         let body2 = strip_trailing_continue(stmts_to_stmt(exit_stmts));
-                        Stmt::While { cond: while_cond, body: Box::new(body2) }
+                        Stmt::While {
+                            cond: while_cond,
+                            body: Box::new(body2),
+                        }
                     }
                 }
             }
@@ -1166,12 +1248,18 @@ impl<'a> Converter<'a> {
                         };
                     }
                     return Stmt::Block(vec![
-                        Stmt::DoWhile { body: Box::new(Stmt::Block(stmts)), cond: c },
+                        Stmt::DoWhile {
+                            body: Box::new(Stmt::Block(stmts)),
+                            cond: c,
+                        },
                         exit,
                     ]);
                 }
                 if let Some((stmts, c)) = extract_trailing_do_while(&body_stmt) {
-                    return Stmt::DoWhile { body: Box::new(Stmt::Block(stmts)), cond: c };
+                    return Stmt::DoWhile {
+                        body: Box::new(Stmt::Block(stmts)),
+                        cond: c,
+                    };
                 }
                 Stmt::While {
                     cond: Expr::Const(ConstVal::Int(1)),
@@ -1187,12 +1275,12 @@ impl<'a> Converter<'a> {
 
     /// True if `target` is inside the loop currently being classified
     /// (approximated: target can reach the header again).
-#[allow(dead_code)]
+    #[allow(dead_code)]
     fn loop_contains(&self, header: usize, target: usize) -> bool {
         can_reach(self.cfg, target, header, 8192)
     }
 
-#[allow(dead_code)]
+    #[allow(dead_code)]
     fn loop_exit_contains(&self, header: usize, target: usize) -> bool {
         // The loop currently being classified is the innermost on the stack
         // BEFORE it was popped; ctx.exits was consumed. Recompute cheaply:
@@ -1282,10 +1370,13 @@ fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
     }
     fn inject(s: &mut Stmt, cond: &Expr) -> bool {
         match s {
-            Stmt::If { cond: c, then_stmt, else_stmt } if c == cond => {
+            Stmt::If {
+                cond: c,
+                then_stmt,
+                else_stmt,
+            } if c == cond => {
                 let then_empty = is_empty(then_stmt);
-                let else_empty =
-                    else_stmt.as_ref().map(|e| is_empty(e)).unwrap_or(true);
+                let else_empty = else_stmt.as_ref().map(|e| is_empty(e)).unwrap_or(true);
                 if then_empty && !else_empty {
                     *then_stmt = Box::new(Stmt::Break(None));
                     true
@@ -1296,9 +1387,7 @@ fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
                     false
                 }
             }
-            Stmt::Try { body, .. } | Stmt::TryWithResources { body, .. } => {
-                inject(body, cond)
-            }
+            Stmt::Try { body, .. } | Stmt::TryWithResources { body, .. } => inject(body, cond),
             Stmt::Block(v) => v.first_mut().map(|f| inject(f, cond)).unwrap_or(false),
             Stmt::Labeled { body, .. } | Stmt::Synchronized { body, .. } => inject(body, cond),
             _ => false,
@@ -1320,8 +1409,15 @@ fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>) {
         Stmt::Block(v) => v,
         other => {
             return match other {
-                Stmt::If { cond: c, then_stmt, else_stmt } if c == cond => (
-                    else_stmt.as_ref().map(|e| (**e).clone()).unwrap_or(Stmt::Block(vec![])),
+                Stmt::If {
+                    cond: c,
+                    then_stmt,
+                    else_stmt,
+                } if c == cond => (
+                    else_stmt
+                        .as_ref()
+                        .map(|e| (**e).clone())
+                        .unwrap_or(Stmt::Block(vec![])),
                     stmt_to_vec((**then_stmt).clone()),
                 ),
                 _ => (other.clone(), vec![]),
@@ -1329,10 +1425,18 @@ fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>) {
         }
     };
     if let Some(first) = items.first() {
-        if let Stmt::If { cond: c, then_stmt, else_stmt } = first {
+        if let Stmt::If {
+            cond: c,
+            then_stmt,
+            else_stmt,
+        } = first
+        {
             if c == cond {
                 let inner = if items.len() == 1 {
-                    else_stmt.as_ref().map(|e| (**e).clone()).unwrap_or(Stmt::Block(vec![]))
+                    else_stmt
+                        .as_ref()
+                        .map(|e| (**e).clone())
+                        .unwrap_or(Stmt::Block(vec![]))
                 } else {
                     let mut rest = vec![else_stmt
                         .as_ref()
@@ -1379,7 +1483,12 @@ pub fn negate(e: Expr) -> Expr {
         // changed the condition's meaning: Arrays.equals' folded
         // `a == null || a2 == null` inverted to `a == null && a2 ==
         // null`, NPE-ing the a2==null path.
-        Expr::Bin { op: op @ (crate::ir::expr::BinOp::LogAnd | crate::ir::expr::BinOp::LogOr), l, r, ty } => {
+        Expr::Bin {
+            op: op @ (crate::ir::expr::BinOp::LogAnd | crate::ir::expr::BinOp::LogOr),
+            l,
+            r,
+            ty,
+        } => {
             let swapped = if matches!(op, crate::ir::expr::BinOp::LogAnd) {
                 crate::ir::expr::BinOp::LogOr
             } else {
@@ -1396,10 +1505,16 @@ pub fn negate(e: Expr) -> Expr {
             if let Some(inv) = op.invert() {
                 Expr::Bin { op: inv, l, r, ty }
             } else {
-                Expr::Un { op: UnOp::Not, e: Box::new(Expr::Bin { op, l, r, ty }) }
+                Expr::Un {
+                    op: UnOp::Not,
+                    e: Box::new(Expr::Bin { op, l, r, ty }),
+                }
             }
         }
-        other => Expr::Un { op: UnOp::Not, e: Box::new(other) },
+        other => Expr::Un {
+            op: UnOp::Not,
+            e: Box::new(other),
+        },
     }
 }
 
@@ -1452,9 +1567,11 @@ fn extract_compound_do_while(body: &Stmt) -> Option<(Vec<Stmt>, Expr, Stmt)> {
             let mut cur = st;
             loop {
                 match cur {
-                    Stmt::If { cond, then_stmt, else_stmt: Some(e) }
-                        if is_continue_stmt(&then_stmt) =>
-                    {
+                    Stmt::If {
+                        cond,
+                        then_stmt,
+                        else_stmt: Some(e),
+                    } if is_continue_stmt(&then_stmt) => {
                         flat.push(Stmt::If {
                             cond,
                             then_stmt,
@@ -1478,11 +1595,11 @@ fn extract_compound_do_while(body: &Stmt) -> Option<(Vec<Stmt>, Expr, Stmt)> {
     // Last statement: `if (c_last) continue; else <exit>` — the exit is the
     // loop's fall-out (a return/throw/break), NOT another continue.
     let (c_last, exit) = match &stmts[n - 1] {
-        Stmt::If { cond, then_stmt, else_stmt: Some(e) }
-            if is_continue_stmt(then_stmt) && !is_continue_stmt(e) =>
-        {
-            (cond.clone(), (**e).clone())
-        }
+        Stmt::If {
+            cond,
+            then_stmt,
+            else_stmt: Some(e),
+        } if is_continue_stmt(then_stmt) && !is_continue_stmt(e) => (cond.clone(), (**e).clone()),
         _ => return None,
     };
     // Walk backwards over preceding `if (ci) continue;` (no else) tests.
@@ -1490,7 +1607,11 @@ fn extract_compound_do_while(body: &Stmt) -> Option<(Vec<Stmt>, Expr, Stmt)> {
     let mut i = n - 1;
     while i >= 1 {
         match &stmts[i - 1] {
-            Stmt::If { cond, then_stmt, else_stmt: None } if is_continue_stmt(then_stmt) => {
+            Stmt::If {
+                cond,
+                then_stmt,
+                else_stmt: None,
+            } if is_continue_stmt(then_stmt) => {
                 conds.push(cond.clone());
                 i -= 1;
             }
@@ -1502,7 +1623,12 @@ fn extract_compound_do_while(body: &Stmt) -> Option<(Vec<Stmt>, Expr, Stmt)> {
     let mut it = conds.into_iter().rev();
     let mut cond = it.next().unwrap();
     for c in it {
-        cond = Expr::Bin { op: BinOp::LogOr, l: Box::new(c), r: Box::new(cond), ty: None };
+        cond = Expr::Bin {
+            op: BinOp::LogOr,
+            l: Box::new(c),
+            r: Box::new(cond),
+            ty: None,
+        };
     }
     Some((body_stmts, cond, exit))
 }
@@ -1518,7 +1644,12 @@ fn extract_trailing_do_while(body: &Stmt) -> Option<(Vec<Stmt>, Expr)> {
         return None;
     }
     let n = stmts.len() - 1;
-    if let Stmt::If { cond, then_stmt, else_stmt } = &stmts[n] {
+    if let Stmt::If {
+        cond,
+        then_stmt,
+        else_stmt,
+    } = &stmts[n]
+    {
         let then_is_cont = |s: &Stmt| {
             matches!(s, Stmt::Continue(None))
                 || matches!(s, Stmt::Block(v) if v.len() == 1 && matches!(v[0], Stmt::Continue(None)))
@@ -1553,7 +1684,11 @@ fn extract_trailing_continue_if(body: &Stmt) -> Option<(Vec<Stmt>, Expr)> {
     let n = stmts.len() - 1;
     // Direct trailing `if (c) continue;`.
     let is_direct = match &stmts[n] {
-        Stmt::If { then_stmt, else_stmt: None, .. } => {
+        Stmt::If {
+            then_stmt,
+            else_stmt: None,
+            ..
+        } => {
             matches!(&**then_stmt, Stmt::Continue(None))
                 || matches!(&**then_stmt, Stmt::Block(tb) if tb.len() == 1 && matches!(tb[0], Stmt::Continue(None)))
         }

@@ -112,7 +112,11 @@ impl Cfg {
             for b in blocks.iter() {
                 if b.start >= r.start && b.start < r.end && b.ins_len != 0 {
                     if let Some(h) = handler {
-                        exc_edges.push(ExcEdge { range: ri, from: b.id, to: h });
+                        exc_edges.push(ExcEdge {
+                            range: ri,
+                            from: b.id,
+                            to: h,
+                        });
                     }
                 }
             }
@@ -133,13 +137,22 @@ impl Cfg {
                 );
             }
             for (i, r) in exc_ranges.iter().enumerate() {
-                eprintln!("CORE_EXC r={} {}..{} -> {} type={:?}", i, r.start, r.end, r.handler, r.catch_type);
+                eprintln!(
+                    "CORE_EXC r={} {}..{} -> {} type={:?}",
+                    i, r.start, r.end, r.handler, r.catch_type
+                );
             }
             for e in &exc_edges {
                 eprintln!("CORE_EDGE r={} from={} to={}", e.range, e.from, e.to);
             }
         }
-        Cfg { blocks, entry, exc_edges, exc_ranges, starts }
+        Cfg {
+            blocks,
+            entry,
+            exc_edges,
+            exc_ranges,
+            starts,
+        }
     }
 
     /// Assemble a CFG from blocks the caller has **already filled in**:
@@ -159,7 +172,13 @@ impl Cfg {
     ) -> Cfg {
         let mut starts: Vec<u32> = blocks.iter().map(|b| b.start).collect();
         starts.sort_unstable();
-        Cfg { blocks, entry, exc_edges, exc_ranges, starts }
+        Cfg {
+            blocks,
+            entry,
+            exc_edges,
+            exc_ranges,
+            starts,
+        }
     }
 
     /// Block containing machine offset `p`.
@@ -212,9 +231,19 @@ mod tests {
     fn preds_and_handlers_are_derived() {
         // 0 → 1 → 2, with 2 throwing into 3.
         let cfg = Cfg::from_blocks(
-            vec![blk(0, 0, 2, vec![1]), blk(1, 2, 2, vec![2]), blk(2, 4, 2, vec![]), blk(3, 6, 1, vec![])],
+            vec![
+                blk(0, 0, 2, vec![1]),
+                blk(1, 2, 2, vec![2]),
+                blk(2, 4, 2, vec![]),
+                blk(3, 6, 1, vec![]),
+            ],
             0,
-            vec![ExcRange { start: 0, end: 6, handler: 6, catch_type: Some("java/lang/Throwable".into()) }],
+            vec![ExcRange {
+                start: 0,
+                end: 6,
+                handler: 6,
+                catch_type: Some("java/lang/Throwable".into()),
+            }],
         );
         assert_eq!(cfg.blocks[1].pred, vec![0]);
         assert_eq!(cfg.blocks[2].pred, vec![1]);

@@ -12,8 +12,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::expr::Expr;
-use crate::ir::stmt::Stmt;
 use crate::ir::expr::TypeRef;
+use crate::ir::stmt::Stmt;
 use crate::types::{ClassAccessFlags, MethodDescriptor};
 
 /// How a nested class was classified.
@@ -122,7 +122,12 @@ pub trait Ctx {
 
     /// The instantiated return type of a call whose methodref owner redeclares
     /// the method with a self-covariant return (Stream over BaseStream).
-    fn polymorphic_ret_cast(&self, cls: &str, name: &str, desc: &MethodDescriptor) -> Option<crate::types::JavaType>;
+    fn polymorphic_ret_cast(
+        &self,
+        cls: &str,
+        name: &str,
+        desc: &MethodDescriptor,
+    ) -> Option<crate::types::JavaType>;
 
     /// Constructor parameter types of `internal` matching `arity`, for
     /// rendering `new` arguments against the right overload.
@@ -240,11 +245,7 @@ pub trait Ctx {
     /// Instantiated SAM return of a functional interface's method, resolved
     /// against a cast's type arguments (`(Function<I,R>) lambda` needs
     /// `(R) value` witnesses on the impl body's returns).
-    fn sam_ret_cast(
-        &self,
-        g: &crate::types::GenericType,
-        sam_name: &str,
-    ) -> Option<TypeRef> {
+    fn sam_ret_cast(&self, g: &crate::types::GenericType, sam_name: &str) -> Option<TypeRef> {
         let _ = (g, sam_name);
         None
     }
@@ -254,7 +255,6 @@ pub trait Ctx {
     fn class_declares_generics(&self, internal: &str) -> bool {
         !self.class_type_params(internal).is_empty()
     }
-
 }
 
 /// A `Ctx` with no metadata: every query answers "unknown".
@@ -268,7 +268,10 @@ pub struct NullCtx {
 
 impl Default for NullCtx {
     fn default() -> Self {
-        NullCtx { class_name: String::new(), level: 52 }
+        NullCtx {
+            class_name: String::new(),
+            level: 52,
+        }
     }
 }
 
@@ -283,7 +286,10 @@ impl Ctx for NullCtx {
         None
     }
     fn family(&self, root: &str) -> Family {
-        Family { root: root.to_string(), ..Default::default() }
+        Family {
+            root: root.to_string(),
+            ..Default::default()
+        }
     }
     fn nested_is_static(&self, _internal: &str) -> bool {
         true
@@ -310,7 +316,12 @@ impl Ctx for NullCtx {
     ) -> Option<(Vec<crate::types::GenericType>, Vec<String>)> {
         None
     }
-    fn polymorphic_ret_cast(&self, _cls: &str, _name: &str, _desc: &MethodDescriptor) -> Option<crate::types::JavaType> {
+    fn polymorphic_ret_cast(
+        &self,
+        _cls: &str,
+        _name: &str,
+        _desc: &MethodDescriptor,
+    ) -> Option<crate::types::JavaType> {
         None
     }
     fn ctor_formals_by_arity(

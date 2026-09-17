@@ -42,7 +42,11 @@ fn has_break_exiting(s: &Stmt, lbl: Option<&str>, depth: usize) -> bool {
         Stmt::Continue(_) | Stmt::Return(_) | Stmt::Throw(_) => false,
         Stmt::Goto(_) => true,
         Stmt::Block(v) => v.iter().any(|x| has_break_exiting(x, lbl, depth)),
-        Stmt::If { then_stmt, else_stmt, .. } => {
+        Stmt::If {
+            then_stmt,
+            else_stmt,
+            ..
+        } => {
             has_break_exiting(then_stmt, lbl, depth)
                 || else_stmt
                     .as_deref()
@@ -62,10 +66,21 @@ fn has_break_exiting(s: &Stmt, lbl: Option<&str>, depth: usize) -> bool {
                     .map(|d| has_break_exiting(d, lbl, depth + 1))
                     .unwrap_or(false)
         }
-        Stmt::Try { body, catches, finally }
-        | Stmt::TryWithResources { body, catches, finally, .. } => {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        }
+        | Stmt::TryWithResources {
+            body,
+            catches,
+            finally,
+            ..
+        } => {
             has_break_exiting(body, lbl, depth)
-                || catches.iter().any(|c| has_break_exiting(&c.body, lbl, depth))
+                || catches
+                    .iter()
+                    .any(|c| has_break_exiting(&c.body, lbl, depth))
                 || finally
                     .as_deref()
                     .map(|f| has_break_exiting(f, lbl, depth))
@@ -93,7 +108,10 @@ mod tests {
     use crate::ir::build::int_const;
 
     fn while_true(body: Stmt) -> Stmt {
-        Stmt::While { cond: int_const(1), body: Box::new(body) }
+        Stmt::While {
+            cond: int_const(1),
+            body: Box::new(body),
+        }
     }
 
     #[test]
@@ -103,11 +121,15 @@ mod tests {
         let nested = Stmt::Block(vec![while_true(Stmt::Block(vec![Stmt::Break(None)]))]);
         assert!(dead_end_infinite_while(&while_true(nested)));
         // A direct break makes the loop completable.
-        assert!(!dead_end_infinite_while(&while_true(Stmt::Block(vec![Stmt::Break(None)]))));
+        assert!(!dead_end_infinite_while(&while_true(Stmt::Block(vec![
+            Stmt::Break(None)
+        ]))));
         // A labeled break to an outer label exits abruptly.
         assert!(dead_end_infinite_while(&Stmt::Labeled {
             label: "L".into(),
-            body: Box::new(while_true(Stmt::Block(vec![Stmt::Break(Some("outer".into()))]))),
+            body: Box::new(while_true(Stmt::Block(vec![Stmt::Break(Some(
+                "outer".into()
+            ))]))),
         }));
     }
 }

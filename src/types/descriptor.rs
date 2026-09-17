@@ -68,8 +68,10 @@ impl JavaType {
     }
 
     pub fn is_reference(&self) -> bool {
-        matches!(self, JavaType::Object(_) | JavaType::Array(_) | JavaType::Void)
-            && !matches!(self, JavaType::Void)
+        matches!(
+            self,
+            JavaType::Object(_) | JavaType::Array(_) | JavaType::Void
+        ) && !matches!(self, JavaType::Void)
     }
 
     /// The JVM descriptor character for primitives; None otherwise.
@@ -93,7 +95,10 @@ impl JavaType {
         match self {
             JavaType::Array(inner) => format!("[{}", inner.to_descriptor()),
             JavaType::Object(name) => format!("L{};", name),
-            p => p.primitive_char().map(|c| c.to_string()).unwrap_or_default(),
+            p => p
+                .primitive_char()
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
         }
     }
 
@@ -140,13 +145,23 @@ pub fn internal_name_to_java(internal: &str, qualify: bool) -> String {
 /// (`DolTest2$$dollah$$`) must keep its `$` (`A..b` does not parse).
 pub fn binary_simple_name(internal: &str) -> String {
     let simple = internal.rsplit(['/', '$']).next().unwrap_or(internal);
-    if simple.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if simple
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         let stripped = simple.trim_start_matches(|c: char| c.is_ascii_digit());
         if !stripped.is_empty() {
             return stripped.to_string();
         }
     }
-    if internal.contains('$') && internal.split('$').skip(1).any(|seg| seg.is_empty() || seg.rsplit('/').next().unwrap_or(seg).is_empty()) {
+    if internal.contains('$')
+        && internal
+            .split('$')
+            .skip(1)
+            .any(|seg| seg.is_empty() || seg.rsplit('/').next().unwrap_or(seg).is_empty())
+    {
         return internal.rsplit('/').next().unwrap_or(internal).to_string();
     }
     internal.rsplit('/').next().unwrap_or(internal).to_string()
@@ -170,7 +185,12 @@ pub fn dotted_source(internal: &str) -> String {
         acc.push_str(first);
     }
     for seg in segs {
-        if seg.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if seg
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             let stripped = seg.trim_start_matches(|c: char| c.is_ascii_digit());
             if !stripped.is_empty() {
                 // local class: unqualified simple name

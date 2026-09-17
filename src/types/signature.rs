@@ -156,7 +156,11 @@ pub fn render_type_params(params: &[TypeParam], out: &mut String) {
             }
         }
         for (j, ib) in p.interface_bounds.iter().enumerate() {
-            out.push_str(if first_bound && j == 0 { " extends " } else { " & " });
+            out.push_str(if first_bound && j == 0 {
+                " extends "
+            } else {
+                " & "
+            });
             out.push_str(&ib.to_java());
         }
     }
@@ -194,7 +198,22 @@ impl<'a> SigParser<'a> {
         let start = self.i;
         while let Some(c) = self.peek() {
             // Java identifiers in signatures: stop at signature metacharacters
-            if matches!(c, b'.' | b';' | b':' | b'<' | b'>' | b'*' | b'+' | b'-' | b'[' | b'^' | b'(' | b')' | b'|' | b'/') {
+            if matches!(
+                c,
+                b'.' | b';'
+                    | b':'
+                    | b'<'
+                    | b'>'
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'['
+                    | b'^'
+                    | b'('
+                    | b')'
+                    | b'|'
+                    | b'/'
+            ) {
                 break;
             }
             self.i += 1;
@@ -225,7 +244,11 @@ impl<'a> SigParser<'a> {
                 self.i += 1;
                 interface_bounds.push(self.field_type()?);
             }
-            params.push(TypeParam { name, class_bound, interface_bounds });
+            params.push(TypeParam {
+                name,
+                class_bound,
+                interface_bounds,
+            });
         }
         self.eat(b'>')?;
         Ok(params)
@@ -377,7 +400,11 @@ impl ClassSig {
             if let Some(last) = segs.last() {
                 let stripped = last.trim_start_matches(|c: char| c.is_ascii_digit());
                 if segs.len() > 1
-                    && last.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                    && last
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
                     && !stripped.is_empty()
                 {
                     s = stripped.to_string();
@@ -422,7 +449,10 @@ impl ClassSig {
 
 /// Parse a ClassSignature attribute value.
 pub fn parse_class_signature(s: &str) -> Option<ClassSignature> {
-    let mut p = SigParser { b: s.as_bytes(), i: 0 };
+    let mut p = SigParser {
+        b: s.as_bytes(),
+        i: 0,
+    };
     let params = p.type_params().ok()?;
     let superclass = p.field_type().ok()?;
     let mut interfaces = Vec::new();
@@ -432,12 +462,19 @@ pub fn parse_class_signature(s: &str) -> Option<ClassSignature> {
     if p.i != s.len() {
         return None;
     }
-    Some(ClassSignature { params, superclass, interfaces })
+    Some(ClassSignature {
+        params,
+        superclass,
+        interfaces,
+    })
 }
 
 /// Parse a MethodSignature attribute value.
 pub fn parse_method_signature(s: &str) -> Option<MethodSignature> {
-    let mut p = SigParser { b: s.as_bytes(), i: 0 };
+    let mut p = SigParser {
+        b: s.as_bytes(),
+        i: 0,
+    };
     let params = p.type_params().ok()?;
     p.eat(b'(').ok()?;
     let mut args = Vec::new();
@@ -454,12 +491,20 @@ pub fn parse_method_signature(s: &str) -> Option<MethodSignature> {
     if p.i != s.len() {
         return None;
     }
-    Some(MethodSignature { params, args, ret, throws })
+    Some(MethodSignature {
+        params,
+        args,
+        ret,
+        throws,
+    })
 }
 
 /// Parse a field (FieldTypeSignature) attribute value.
 pub fn parse_field_signature(s: &str) -> Option<GenericType> {
-    let mut p = SigParser { b: s.as_bytes(), i: 0 };
+    let mut p = SigParser {
+        b: s.as_bytes(),
+        i: 0,
+    };
     let t = p.field_type().ok()?;
     if p.i != s.len() {
         return None;
@@ -477,7 +522,9 @@ mod tests {
         assert_eq!(cs.params.len(), 1);
         assert_eq!(cs.params[0].name, "T");
         assert!(cs.to_java().starts_with("<T>"));
-        assert!(cs.to_java().contains("java.util.AbstractList<java.lang.String>"));
+        assert!(cs
+            .to_java()
+            .contains("java.util.AbstractList<java.lang.String>"));
     }
 
     #[test]
@@ -494,7 +541,10 @@ mod tests {
 
     #[test]
     fn method_sig() {
-        let m = parse_method_signature("<K:Ljava/lang/Object;V:Ljava/lang/Object;>(TK;TV;)TV;^Ljava/io/IOException;").unwrap();
+        let m = parse_method_signature(
+            "<K:Ljava/lang/Object;V:Ljava/lang/Object;>(TK;TV;)TV;^Ljava/io/IOException;",
+        )
+        .unwrap();
         assert_eq!(m.params.len(), 2);
         assert_eq!(m.args.len(), 2);
         assert_eq!(m.throws.len(), 1);
@@ -513,7 +563,8 @@ mod tests {
 
     #[test]
     fn typevar_bound() {
-        let cs = parse_class_signature("<E:Ljava/lang/Comparable<-TE;>;>Ljava/lang/Object;").unwrap();
+        let cs =
+            parse_class_signature("<E:Ljava/lang/Comparable<-TE;>;>Ljava/lang/Object;").unwrap();
         assert_eq!(cs.params.len(), 1);
         let cb = cs.params[0].class_bound.as_ref().unwrap();
         assert!(cb.to_java().contains("java.lang.Comparable<? super E>"));

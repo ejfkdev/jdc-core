@@ -38,20 +38,20 @@ pub fn subst_typevars(
                 .iter()
                 .map(|p| crate::types::ClassSigPart {
                     name: p.name.clone(),
-                    args: p.args.iter().map(|a| subst_typevars(a, params, args)).collect(),
+                    args: p
+                        .args
+                        .iter()
+                        .map(|a| subst_typevars(a, params, args))
+                        .collect(),
                 })
                 .collect(),
         }),
-        G::Wildcard(crate::types::WildcardBound::Extends(i)) => {
-            G::Wildcard(crate::types::WildcardBound::Extends(Box::new(
-                subst_typevars(i, params, args),
-            )))
-        }
-        G::Wildcard(crate::types::WildcardBound::Super(i)) => {
-            G::Wildcard(crate::types::WildcardBound::Super(Box::new(
-                subst_typevars(i, params, args),
-            )))
-        }
+        G::Wildcard(crate::types::WildcardBound::Extends(i)) => G::Wildcard(
+            crate::types::WildcardBound::Extends(Box::new(subst_typevars(i, params, args))),
+        ),
+        G::Wildcard(crate::types::WildcardBound::Super(i)) => G::Wildcard(
+            crate::types::WildcardBound::Super(Box::new(subst_typevars(i, params, args))),
+        ),
         other => other.clone(),
     }
 }

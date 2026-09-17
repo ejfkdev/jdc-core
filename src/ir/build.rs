@@ -15,7 +15,9 @@ pub enum Term {
     Fallthrough,
     Goto,
     /// Jumps to `succ[1]` when `cond` is true; falls through to `succ[0]`.
-    Cond { cond: Expr },
+    Cond {
+        cond: Expr,
+    },
     /// A multi-way branch. `default` is the machine offset of the default
     /// arm when the front-end can identify it (JVM: the switch payload's
     /// default; DEX: the `packed-switch`/`sparse-switch` payload's default);
@@ -68,7 +70,10 @@ pub fn int_const(i: i32) -> Expr {
 pub fn has_side_effects(e: &Expr) -> bool {
     match e {
         Expr::Const(_) | Expr::Local { .. } | Expr::This | Expr::Raw(_) | Expr::RawT(..) => false,
-        Expr::New { .. } | Expr::Method { .. } | Expr::Invokedynamic { .. } | Expr::Lambda(_)
+        Expr::New { .. }
+        | Expr::Method { .. }
+        | Expr::Invokedynamic { .. }
+        | Expr::Lambda(_)
         | Expr::AnonNew { .. } => true,
         Expr::Assign { .. } | Expr::PreIncDec { .. } | Expr::PostIncDec { .. } => true,
         Expr::Field { owner, .. } => {
@@ -76,7 +81,9 @@ pub fn has_side_effects(e: &Expr) -> bool {
             owner.is_some()
         }
         Expr::ArrayIndex { .. } => true,
-        Expr::Un { e, .. } | Expr::Cast { e, .. } | Expr::InstanceOf { e, .. } => has_side_effects(e),
+        Expr::Un { e, .. } | Expr::Cast { e, .. } | Expr::InstanceOf { e, .. } => {
+            has_side_effects(e)
+        }
         Expr::Bin { l, r, .. } => has_side_effects(l) || has_side_effects(r),
         Expr::Cond { c, t, f } => has_side_effects(c) || has_side_effects(t) || has_side_effects(f),
         Expr::NewArray { dims, init, .. } => {

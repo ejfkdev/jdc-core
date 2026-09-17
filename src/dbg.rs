@@ -21,7 +21,11 @@ macro_rules! dbg_value {
     ($name:literal, $ty:ty) => {{
         static CACHED: std::sync::OnceLock<Option<$ty>> = std::sync::OnceLock::new();
         CACHED
-            .get_or_init(|| std::env::var($name).ok().and_then(|v| v.parse::<$ty>().ok()))
+            .get_or_init(|| {
+                std::env::var($name)
+                    .ok()
+                    .and_then(|v| v.parse::<$ty>().ok())
+            })
             .clone()
     }};
 }

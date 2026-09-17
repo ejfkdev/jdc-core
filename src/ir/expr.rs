@@ -39,7 +39,9 @@ impl TypeRef {
     pub fn internal_name(&self) -> Option<&str> {
         match self {
             TypeRef::J(JavaType::Object(n)) => Some(n),
-            TypeRef::G(GenericType::Class(cs)) if cs.parts.iter().all(|p| p.args.is_empty()) => None, // owned string; caller uses erased
+            TypeRef::G(GenericType::Class(cs)) if cs.parts.iter().all(|p| p.args.is_empty()) => {
+                None
+            } // owned string; caller uses erased
             _ => None,
         }
     }
@@ -102,21 +104,36 @@ impl ConstVal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Neg,     // -x
-    Not,     // !x
-    BitNot,  // ~x
+    Neg,    // -x
+    Not,    // !x
+    BitNot, // ~x
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    Shl, Shr, Ushr,
-    And, Or, Xor,
-    Eq, Ne, Lt, Ge, Gt, Le,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Shl,
+    Shr,
+    Ushr,
+    And,
+    Or,
+    Xor,
+    Eq,
+    Ne,
+    Lt,
+    Ge,
+    Gt,
+    Le,
     /// Reference equality on objects (==).
-    RefEq, RefNe,
+    RefEq,
+    RefNe,
     /// Logical && and || (from short-circuit structuring).
-    LogAnd, LogOr,
+    LogAnd,
+    LogOr,
     /// String concatenation `+`.
     StrCat,
 }
@@ -185,9 +202,17 @@ impl BinOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
     Plain,
-    Add, Sub, Mul, Div, Rem,
-    Shl, Shr, Ushr,
-    And, Or, Xor,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Shl,
+    Shr,
+    Ushr,
+    And,
+    Or,
+    Xor,
 }
 
 impl AssignOp {
@@ -280,7 +305,10 @@ pub enum Expr {
     Const(ConstVal),
     /// Local variable by VarId, with its declared type (needed for
     /// category-1 vs category-2 stack operations like dup2/pop2).
-    Local { var: u32, ty: TypeRef },
+    Local {
+        var: u32,
+        ty: TypeRef,
+    },
     This,
     /// `new T(args)` (constructor call folded with New when possible).
     New {
@@ -423,7 +451,11 @@ impl Expr {
             // dropped the trailing levels (ML_DSA_Impls.implGenerate-
             // KeyPair: the byte[][] literal evidenced byte[] for the
             // return-temp slot — byte[][]无法转换为byte[] x2 classes).
-            Expr::NewArray { elem, trailing_dims, .. } => {
+            Expr::NewArray {
+                elem,
+                trailing_dims,
+                ..
+            } => {
                 let mut t = elem.erased();
                 for _ in 0..=(*trailing_dims as usize) {
                     t = JavaType::Array(Box::new(t));
@@ -449,8 +481,15 @@ impl Expr {
                 // present it mirrors the operands) misled the bool->int
                 // assignment rewrite (`int mode = e != null;` stayed
                 // unrewrapped: jdk11 SynchronousQueue).
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Ge | BinOp::Gt
-                | BinOp::Le | BinOp::RefEq | BinOp::RefNe | BinOp::LogAnd
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Ge
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::RefEq
+                | BinOp::RefNe
+                | BinOp::LogAnd
                 | BinOp::LogOr => JavaType::Boolean.into(),
                 _ => ty.clone().unwrap_or_else(|| l.type_ref()),
             },
@@ -503,7 +542,9 @@ impl Expr {
             }
             Expr::InstanceOf { .. } => outer_prec > 10,
             Expr::Cond { .. } => outer_prec > 2,
-            Expr::Assign { .. } | Expr::PreIncDec { .. } | Expr::PostIncDec { .. } => outer_prec > 1,
+            Expr::Assign { .. } | Expr::PreIncDec { .. } | Expr::PostIncDec { .. } => {
+                outer_prec > 1
+            }
             Expr::Un { .. } => outer_prec > 14,
             Expr::Cast { .. } => outer_prec > 13,
             // `new int[1][0]` as an indexing base or receiver must

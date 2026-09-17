@@ -24,8 +24,33 @@ use crate::ir::expr::Expr;
 // Dominators & flow queries
 // ---------------------------------------------------------------------------
 
+/// Method-invariant inputs of `immediate_postdom` (see postdom_ipdom).
+/// Frozen at first use; every input is immutable after construction, so
+/// the cache cannot drift from the per-call recompute it replaces.
+#[derive(Clone)]
+struct PostdomCtx {
+    exempt: HashSet<usize>,
+    terminators: HashSet<usize>,
+    final_writers: HashSet<usize>,
+    abrupt_only: HashSet<usize>,
+    stmt_counts: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
 pub struct DomInfo {
     pub idom: Vec<usize>,
+}
+
+/// Perf instrumentation: how many times the walk recomputed dominators
+/// (and over how many blocks). Off by default — the unconditional atomics
+/// contended on 7M calls/run.
+pub static DOM_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static DOM_BLOCKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static DOM_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable dominator-recompute counters (diagnostics).
+pub fn set_dom_counters(on: bool) {
+    DOM_ON.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl DomInfo {
@@ -77,6 +102,13 @@ pub fn reverse_postorder(cfg: &Cfg, entry: usize, universe: &HashSet<usize>) -> 
 }
 
 pub fn compute_dominators(cfg: &Cfg, universe: &HashSet<usize>, entry: usize) -> DomInfo {
+    if DOM_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        DOM_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        DOM_BLOCKS.fetch_add(
+            cfg.blocks.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     let n = cfg.blocks.len();
     let mut idom = vec![usize::MAX; n];
     if universe.contains(&entry) {
@@ -182,6 +214,51 @@ pub fn set_budget_override(v: Option<u32>) {
     BUDGET_OVERRIDE.with(|c| c.set(v));
 }
 
+thread_local! {
+    /// Per-method walk visit budget (None = off). Bounds CALL COUNT: the
+    /// walk degrades to a Goto at the entry once the budget is spent —
+    /// conversion stays valid.
+    static WALK_VISIT_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install/clear the per-method walk visit budget.
+pub fn set_walk_visit_budget(v: Option<u64>) {
+    WALK_VISIT_OVERRIDE.with(|c| c.set(v));
+}
+
+thread_local! {
+    /// Per-method walk wall-clock deadline (None = off). The visit budget
+    /// is deterministic but only bounds CALL COUNT — one pathological
+    /// method (Telegram SendMessagesHelper.sendMessage, 1734 blocks)
+    /// spends ~6ms per visit in scope/set construction, so even a tight
+    /// visit budget ran minutes. The deadline cuts the walk at a fixed
+    /// time; degradation is a Goto, same as the visit budget.
+    static WALK_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install/clear the per-method walk deadline.
+pub fn set_walk_deadline(d: Option<std::time::Instant>) {
+    WALK_DEADLINE.with(|c| c.set(d));
+}
+
+/// Walk() calls consumed by the last method (feature "visit-stats").
+#[cfg(feature = "visit-stats")]
+thread_local! {
+    pub static WALK_VISITS_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "visit-stats")]
+pub fn walk_visits_consumed() -> u64 {
+    WALK_VISITS_TOTAL.with(|c| c.get())
+}
+
+#[cfg(feature = "visit-stats")]
+pub fn reset_visit_stats() {
+    WALK_VISITS_TOTAL.with(|c| c.set(0));
+}
+
 /// Blocks normally reachable from `entry` without entering `stop`.
 pub fn reachable_within(cfg: &Cfg, entry: usize, stop: &HashSet<usize>) -> HashSet<usize> {
     let mut seen = HashSet::new();
@@ -208,11 +285,13 @@ pub fn reachable_within(cfg: &Cfg, entry: usize, stop: &HashSet<usize>) -> HashS
 /// (vx, block_id -> ipdom_id). The single sentinel root makes the reverse RPO
 /// well-defined and the post-dominator forest a single tree, so the CHK
 /// `intersect` walk always terminates (it climbs toward `vx`).
-pub(crate) fn compute_postdominators(cfg: &Cfg, universe: &HashSet<usize>) -> (usize, HashMap<usize, usize>) {
+pub(crate) fn compute_postdominators(
+    cfg: &Cfg,
+    universe: &HashSet<usize>,
+) -> (usize, HashMap<usize, usize>) {
     let vx = cfg.blocks.len();
     let leaves_universe = |b: usize| -> bool {
-        cfg.blocks[b].succ.is_empty()
-            || cfg.blocks[b].succ.iter().any(|s| !universe.contains(s))
+        cfg.blocks[b].succ.is_empty() || cfg.blocks[b].succ.iter().any(|s| !universe.contains(s))
     };
     let succs_of = |b: usize| -> Vec<usize> {
         let mut v: Vec<usize> = cfg.blocks[b]
@@ -235,8 +314,11 @@ pub(crate) fn compute_postdominators(cfg: &Cfg, universe: &HashSet<usize>) -> (u
         visited.insert(vx);
         let mut stack: Vec<usize> = Vec::new();
         let mut state: HashMap<usize, usize> = HashMap::new();
-        let mut seeds: Vec<usize> =
-            universe.iter().copied().filter(|&b| leaves_universe(b)).collect();
+        let mut seeds: Vec<usize> = universe
+            .iter()
+            .copied()
+            .filter(|&b| leaves_universe(b))
+            .collect();
         seeds.sort_unstable_by_key(|b| cfg.blocks[*b].start);
         for s in seeds.iter().rev() {
             if visited.insert(*s) {
@@ -384,10 +466,7 @@ pub fn immediate_postdom(
     // readAllBytes (double read). The successor stays a candidate when it
     // is the entry's ONLY out (degenerate) or a statement-free stub (a
     // transparent trampoline to the real merge, common in javac output).
-    let self_loop = cfg.blocks[entry]
-        .succ
-        .iter()
-        .any(|&x| x == entry);
+    let self_loop = cfg.blocks[entry].succ.iter().any(|&x| x == entry);
     let mut best: Option<(u32, usize)> = None;
     let mut any_rejected = false;
     for (&cand, &d0) in dists[0].iter() {
@@ -402,7 +481,10 @@ pub fn immediate_postdom(
             // no statements either, and the false-merge rejection below is
             // calibrated on the instruction-level shape.)
             let stmt_free = cfg.blocks[cand].ins_len == 1
-                && results.get(cand).map(|r| matches!(r.term, Term::Goto)).unwrap_or(false);
+                && results
+                    .get(cand)
+                    .map(|r| matches!(r.term, Term::Goto))
+                    .unwrap_or(false);
             // A statement-bearing successor is only a FALSE merge when
             // another path BYPASSES it (compound-if then-blocks, the
             // OCSP shared-assign block): some successor reaches one of
@@ -432,8 +514,8 @@ pub fn immediate_postdom(
             // its own per-arrival try copy; exempting them wholesale
             // wrapped the giant shared region in one FileOutputStream TWR
             // whose javac expansion overflowed (try 语句的代码过长 x93).
-            let same_body = entry_group.is_some()
-                && body_group_of.get(&cand) == entry_group.as_ref();
+            let same_body =
+                entry_group.is_some() && body_group_of.get(&cand) == entry_group.as_ref();
             let stmts_at_least_8 = stmt_counts.get(cand).copied().unwrap_or(0) >= 8;
             // Reachability set below cand: the bypass probe must see the
             // WHOLE downstream flow, not just cand's immediate succs —
@@ -657,9 +739,13 @@ pub fn immediate_postdom(
                     }));
             if bypass {
                 if crate::dbg_flag!("JCDC_DBG_PDJ") {
-                    eprintln!("PDJ-REJECT entry_pc={} cand={} cand_pc={} cand_stmts={}",
-                        cfg.blocks[entry].start, cand, cfg.blocks[cand].start,
-                        cfg.blocks[cand].ins_len as usize);
+                    eprintln!(
+                        "PDJ-REJECT entry_pc={} cand={} cand_pc={} cand_stmts={}",
+                        cfg.blocks[entry].start,
+                        cand,
+                        cfg.blocks[cand].start,
+                        cfg.blocks[cand].ins_len as usize
+                    );
                 }
                 rejected = true;
                 any_rejected = true;
@@ -755,8 +841,7 @@ pub fn immediate_postdom(
                 let better = match best2 {
                     None => true,
                     Some((bd, bc)) => {
-                        total < bd
-                            || (total == bd && cfg.blocks[cand].start < cfg.blocks[bc].start)
+                        total < bd || (total == bd && cfg.blocks[cand].start < cfg.blocks[bc].start)
                     }
                 };
                 if better {
@@ -767,9 +852,13 @@ pub fn immediate_postdom(
         if let Some(b2) = best2 {
             if b2.0 <= 8 {
                 if crate::dbg_flag!("JCDC_DBG_PDJ") {
-                    eprintln!("PDJ-RESCORE entry_pc={} pick={} pick_pc={} plain={:?}",
-                        cfg.blocks[entry].start, b2.1, cfg.blocks[b2.1].start,
-                        best.map(|(_, c)| c));
+                    eprintln!(
+                        "PDJ-RESCORE entry_pc={} pick={} pick_pc={} plain={:?}",
+                        cfg.blocks[entry].start,
+                        b2.1,
+                        cfg.blocks[b2.1].start,
+                        best.map(|(_, c)| c)
+                    );
                 }
                 return Some(b2.1);
             }
@@ -804,13 +893,20 @@ fn stmts_mention_addsuppressed(stmts: &[crate::ir::stmt::Stmt]) -> bool {
     fn ex(e: &crate::ir::expr::Expr) -> bool {
         use crate::ir::expr::Expr as E;
         match e {
-            E::Method { name, owner, args, .. } => {
+            E::Method {
+                name, owner, args, ..
+            } => {
                 name == "addSuppressed"
                     || owner.as_deref().map(ex).unwrap_or(false)
                     || args.iter().any(ex)
             }
             E::Field { owner: Some(o), .. } => ex(o),
-            E::Bin { l, r, .. } | E::Assign { target: l, value: r, .. } => ex(l) || ex(r),
+            E::Bin { l, r, .. }
+            | E::Assign {
+                target: l,
+                value: r,
+                ..
+            } => ex(l) || ex(r),
             E::Cond { c, t, f } => ex(c) || ex(t) || ex(f),
             E::Un { e: x, .. }
             | E::Cast { e: x, .. }
@@ -820,8 +916,7 @@ fn stmts_mention_addsuppressed(stmts: &[crate::ir::stmt::Stmt]) -> bool {
             E::ArrayIndex { array, index } => ex(array) || ex(index),
             E::New { args, .. } | E::AnonNew { args, .. } => args.iter().any(ex),
             E::NewArray { dims, init, .. } => {
-                dims.iter().any(ex)
-                    || init.as_ref().map(|v| v.iter().any(ex)).unwrap_or(false)
+                dims.iter().any(ex) || init.as_ref().map(|v| v.iter().any(ex)).unwrap_or(false)
             }
             E::StringConcat(parts) => parts
                 .iter()
@@ -839,44 +934,68 @@ fn stmts_mention_addsuppressed(stmts: &[crate::ir::stmt::Stmt]) -> bool {
             S::LocalDef { init: Some(e), .. } => ex(e),
             S::Return(e) => e.as_ref().map(ex).unwrap_or(false),
             S::Throw(e) => ex(e),
-            S::If { cond, then_stmt, else_stmt } => {
-                ex(cond)
-                    || st(then_stmt)
-                    || else_stmt.as_deref().map(st).unwrap_or(false)
-            }
+            S::If {
+                cond,
+                then_stmt,
+                else_stmt,
+            } => ex(cond) || st(then_stmt) || else_stmt.as_deref().map(st).unwrap_or(false),
             S::While { cond, body } | S::DoWhile { body, cond } => ex(cond) || st(body),
-            S::For { init, cond, update, body } => {
+            S::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
                 init.iter().any(st)
                     || cond.as_ref().map(ex).unwrap_or(false)
                     || update.iter().any(ex)
                     || st(body)
             }
             S::ForEach { iterable, body, .. } => ex(iterable) || st(body),
-            S::Switch { selector, cases, default, .. } => {
+            S::Switch {
+                selector,
+                cases,
+                default,
+                ..
+            } => {
                 ex(selector)
                     || cases.iter().any(|c| c.body.iter().any(st))
                     || default.as_deref().map(st).unwrap_or(false)
             }
-            S::Try { body, catches, finally } | S::TryWithResources { body, catches, finally, .. } => {
+            S::Try {
+                body,
+                catches,
+                finally,
+            }
+            | S::TryWithResources {
+                body,
+                catches,
+                finally,
+                ..
+            } => {
                 st(body)
                     || catches.iter().any(|c| st(&c.body))
                     || finally.as_deref().map(st).unwrap_or(false)
             }
             S::Synchronized { lock, body } => ex(lock) || st(body),
             S::Labeled { body, .. } => st(body),
-            S::Assert { cond, msg } => {
-                ex(cond) || msg.as_ref().map(ex).unwrap_or(false)
-            }
+            S::Assert { cond, msg } => ex(cond) || msg.as_ref().map(ex).unwrap_or(false),
             _ => false,
         }
     }
     stmts.iter().any(st)
 }
 
-pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::BlockResult>>) -> Vec<TryGroup> {
+pub fn group_exceptions_with(
+    cfg: &Cfg,
+    results: Option<&Vec<crate::ir::build::BlockResult>>,
+) -> Vec<TryGroup> {
     let mut groups: Vec<TryGroup> = Vec::new();
     for (ri, r) in cfg.exc_ranges.iter().enumerate() {
-        if let Some(g) = groups.iter_mut().find(|g| g.start == r.start && g.end == r.end) {
+        if let Some(g) = groups
+            .iter_mut()
+            .find(|g| g.start == r.start && g.end == r.end)
+        {
             g.handlers.push((r.handler, r.catch_type.clone()));
             g.ranges.push(ri);
         } else {
@@ -895,11 +1014,8 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
     // region structures as a single try. The handler's self-protection
     // range (start == handler pc) never merges into its own group.
     fn handler_key(g: &TryGroup) -> Vec<(u32, Option<String>)> {
-        let mut v: Vec<(u32, Option<String>)> = g
-            .handlers
-            .iter()
-            .map(|(h, t)| (*h, t.clone()))
-            .collect();
+        let mut v: Vec<(u32, Option<String>)> =
+            g.handlers.iter().map(|(h, t)| (*h, t.clone())).collect();
         v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         v.dedup();
         v
@@ -908,7 +1024,11 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
         let mut merged_any = false;
         'outer: for i in 0..groups.len() {
             for j in (i + 1)..groups.len() {
-                let (a, b) = if groups[i].start <= groups[j].start { (i, j) } else { (j, i) };
+                let (a, b) = if groups[i].start <= groups[j].start {
+                    (i, j)
+                } else {
+                    (j, i)
+                };
                 if handler_key(&groups[a]) != handler_key(&groups[b]) {
                     continue;
                 }
@@ -938,12 +1058,11 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
                     // handler INSIDE the gap fails the same way.
                     let own_handlers: Vec<u32> =
                         groups[a].handlers.iter().map(|(h, _)| *h).collect();
-                    let seam_clear_of_foreign_handlers =
-                        !cfg.exc_ranges.iter().any(|r| {
-                            !own_handlers.contains(&r.handler)
-                                && r.handler > groups[a].end
-                                && r.handler <= groups[b].start
-                        });
+                    let seam_clear_of_foreign_handlers = !cfg.exc_ranges.iter().any(|r| {
+                        !own_handlers.contains(&r.handler)
+                            && r.handler > groups[a].end
+                            && r.handler <= groups[b].start
+                    });
                     // The gap blocks themselves must be pure terminator
                     // flow (the handler's inline finally copies —
                     // `unlock; return false`) with no TWR close
@@ -955,22 +1074,22 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
                             .blocks
                             .iter()
                             .filter(|bl| bl.ins_len != 0)
-                            .filter(|bl| {
-                                bl.start >= groups[a].end && bl.end <= groups[b].start
-                            })
+                            .filter(|bl| bl.start >= groups[a].end && bl.end <= groups[b].start)
                             .all(|bl| {
                                 bl.succ.is_empty()
                                     && results
-                                        .map(|rs| {
-                                            !stmts_mention_addsuppressed(&rs[bl.id].stmts)
-                                        })
+                                        .map(|rs| !stmts_mention_addsuppressed(&rs[bl.id].stmts))
                                         .unwrap_or(true)
                             });
                     if !gap_terminator_only {
                         continue;
                     }
                 }
-                if groups[a].handlers.iter().any(|(h, _)| *h == groups[b].start) {
+                if groups[a]
+                    .handlers
+                    .iter()
+                    .any(|(h, _)| *h == groups[b].start)
+                {
                     continue;
                 }
                 let new_start = groups[a].start.min(groups[b].start);
@@ -1066,9 +1185,7 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
                 let foreign_inside = cfg.exc_ranges.iter().any(|r| {
                     let owned_by_x_or_y = x.handlers.iter().any(|(h, _)| *h == r.handler)
                         || y.handlers.iter().any(|(h, _)| *h == r.handler);
-                    !owned_by_x_or_y
-                        && r.start >= x.start
-                        && r.end <= y.end
+                    !owned_by_x_or_y && r.start >= x.start && r.end <= y.end
                 });
                 if foreign_inside {
                     continue;
@@ -1104,7 +1221,9 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
 #[derive(Debug, Clone)]
 pub enum Region {
     /// Statements of one basic block; terminal handled by the enclosing region.
-    Basic { block: usize },
+    Basic {
+        block: usize,
+    },
     Seq(Vec<Region>),
     If {
         /// block carrying the conditional terminal
@@ -1139,10 +1258,14 @@ pub enum Region {
         catches: Vec<(Vec<String>, usize, Box<Region>)>,
     },
     /// Jump to a block outside the current region (resolved later).
-    Goto { target: usize },
+    Goto {
+        target: usize,
+    },
     /// Duplicate of an already-claimed pure block's statements (shared
     /// value block reached from multiple branches).
-    CopyStmts { block: usize },
+    CopyStmts {
+        block: usize,
+    },
     Empty,
 }
 
@@ -1195,12 +1318,22 @@ impl Region {
     /// unreachable code).
     fn jump_targets(r: &Region, out: &mut std::collections::HashSet<usize>) {
         match r {
-            Region::Loop { header, body, exits, .. } => {
+            Region::Loop {
+                header,
+                body,
+                exits,
+                ..
+            } => {
                 out.insert(*header);
                 out.extend(exits.iter().copied());
                 Region::jump_targets(body, out);
             }
-            Region::Switch { cases, default, follow, .. } => {
+            Region::Switch {
+                cases,
+                default,
+                follow,
+                ..
+            } => {
                 if let Some(f) = follow {
                     out.insert(*f);
                 }
@@ -1284,6 +1417,16 @@ pub struct Structurer<'a> {
     /// Current `walk` recursion depth (hang guard for pathological methods
     /// whose shared-tail / branch decomposition does not converge).
     walk_depth: usize,
+    /// Remaining walk visits when a budget is armed (u64::MAX = off).
+    walk_visits_left: std::cell::Cell<u64>,
+    /// Walk wall-clock deadline (see set_walk_deadline); None = off.
+    walk_deadline: Option<std::time::Instant>,
+    /// Method-invariant rejection sets for postdom_ipdom, computed once.
+    /// Every input is constructor-built and never mutated afterwards
+    /// (handler_group/groups are filled only in the constructor,
+    /// results/cfg are borrows, final_fields stays empty in the
+    /// Structurer) — see postdom_ipdom.
+    postdom_ctx: std::cell::OnceCell<PostdomCtx>,
     /// Per-method ticket budget for COPY-producing mechanisms
     /// (copy_walk, PARKCHAIN chain completions, per-arrival fills).
     /// Nested copies multiply: jdk8 java.awt.Toolkit.eventDispatched's
@@ -1429,7 +1572,11 @@ impl<'a> Structurer<'a> {
     /// flow: t starts at/after the group end and is not a handler head.
     fn strip_handler_exit_goto(&self, r: &mut Region, end_pc: u32) {
         let ok = |t: usize| {
-            self.cfg.blocks.get(t).map(|b| b.start >= end_pc).unwrap_or(false)
+            self.cfg
+                .blocks
+                .get(t)
+                .map(|b| b.start >= end_pc)
+                .unwrap_or(false)
                 && !self.is_handler(t)
         };
         match r {
@@ -1503,9 +1650,7 @@ impl<'a> Structurer<'a> {
                 // selfInterrupt+athrow) while the loop's enclosing scope
                 // structures it and the post-If continuation copies
                 // handle the rest.
-                if self.sese_loop_headers.contains(&s)
-                    || self.loops_stack.contains(&s)
-                {
+                if self.sese_loop_headers.contains(&s) || self.loops_stack.contains(&s) {
                     continue;
                 }
                 if self.cfg.blocks[s]
@@ -1667,7 +1812,11 @@ fn active_filtered(active: &[usize], structured: &HashSet<usize>) -> Vec<usize> 
     if structured.is_empty() {
         return active.to_vec();
     }
-    active.iter().copied().filter(|g| !structured.contains(g)).collect()
+    active
+        .iter()
+        .copied()
+        .filter(|g| !structured.contains(g))
+        .collect()
 }
 
 /// True when the region's terminal edge is a Goto to one of the loop's
@@ -1766,9 +1915,9 @@ pub(crate) fn region_terminates_ex(
         // after the non-completing loop — 无法访问的语句 x2 trees).
         Region::Try { body, catches, .. } => {
             region_terminates_ex(body, results, handler_exits)
-                && catches.iter().all(|(_, _, c)| {
-                    region_terminates_ex(c, results, handler_exits)
-                })
+                && catches
+                    .iter()
+                    .all(|(_, _, c)| region_terminates_ex(c, results, handler_exits))
         }
         _ => false,
     }
@@ -1797,11 +1946,7 @@ fn switch_completes_normally(
             _ => false,
         }
     }
-    fn arm_abrupt(
-        r: &Region,
-        follow: usize,
-        results: &[crate::ir::build::BlockResult],
-    ) -> bool {
+    fn arm_abrupt(r: &Region, follow: usize, results: &[crate::ir::build::BlockResult]) -> bool {
         !breaks_out(r, follow) && region_terminates(r, results)
     }
     match r {
@@ -1814,9 +1959,6 @@ fn switch_completes_normally(
         _ => !region_terminates(r, results),
     }
 }
-
-
-
 
 /// Remove a trailing `Goto` to a sibling case head (Java fallthrough).
 fn strip_fallthrough_goto(r: Region, heads: &HashSet<usize>) -> Region {
@@ -1863,7 +2005,12 @@ fn region_shape(r: &Region) -> String {
         ),
         Region::If { block, .. } => format!("If({})", block),
         Region::Loop { header, exits, .. } => format!("Loop({} exits={:?})", header, exits),
-        Region::Switch { block, cases, default, .. } => format!(
+        Region::Switch {
+            block,
+            cases,
+            default,
+            ..
+        } => format!(
             "Switch({} cases={} def={})",
             block,
             cases.len(),
@@ -1913,58 +2060,169 @@ impl<'a> Structurer<'a> {
         for (&merge, (root, _vis)) in &fold_regions {
             fold_root_to_merge.insert(*root, merge);
         }
-        Structurer { cfg, results, groups, body_group, handler_group, diamond_merges, fold_regions, fold_root_to_merge, copied_tails: HashSet::new(), loops_stack: Vec::new(), switch_depth: 0, case_arm_ctx: Vec::new(), sese_loop_headers: std::collections::HashSet::new(), sese_exc_retry_headers: std::collections::HashSet::new(), walk_depth: 0, copy_budget: std::cell::Cell::new(BUDGET_OVERRIDE.with(|c| c.get()).or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32)).unwrap_or(512)), final_fields: HashSet::new(), structuring_groups: std::cell::RefCell::new(Vec::new()) }
+        Self::from_parts(cfg, results, groups, diamond_merges, fold_regions)
+    }
+
+    /// Constructor for callers that already computed the exception groups
+    /// (e.g. to share them with the Converter): skips the internal
+    /// `group_exceptions_with` recompute. The body/handler maps derive
+    /// from the passed groups exactly as `with_diamonds` derives them.
+    pub fn with_precomputed_groups(
+        cfg: &'a Cfg,
+        results: &'a Vec<BlockResult>,
+        groups: Vec<TryGroup>,
+        diamond_merges: std::collections::HashSet<usize>,
+        fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
+    ) -> Structurer<'a> {
+        Self::from_parts(cfg, results, groups, diamond_merges, fold_regions)
+    }
+
+    /// Shared constructor tail: the group-derived indexes and the walk
+    /// guards (visit budget + deadline read from their thread-locals —
+    /// both None in jcdc, armed per-method by ddc).
+    fn from_parts(
+        cfg: &'a Cfg,
+        results: &'a Vec<BlockResult>,
+        groups: Vec<TryGroup>,
+        diamond_merges: std::collections::HashSet<usize>,
+        fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
+    ) -> Structurer<'a> {
+        let mut body_group = HashMap::new();
+        let mut handler_group = HashMap::new();
+        // Groups are sorted outer-first (start asc, end desc); later
+        // (more nested) groups overwrite so each block maps to its
+        // INNERMOST containing try body.
+        for (gi, g) in groups.iter().enumerate() {
+            for b in &cfg.blocks {
+                if b.ins_len == 0 {
+                    continue;
+                }
+                if b.start >= g.start && b.end <= g.end.max(g.start + 1) {
+                    body_group.insert(b.id, gi);
+                }
+            }
+            for (hpc, _) in &g.handlers {
+                if let Some(hb) = cfg.block_at(*hpc) {
+                    handler_group.entry(hb).or_insert(gi);
+                }
+            }
+        }
+        // Reverse index: fold root -> merge block.
+        let mut fold_root_to_merge = HashMap::new();
+        for (&merge, (root, _vis)) in &fold_regions {
+            fold_root_to_merge.insert(*root, merge);
+        }
+        Structurer {
+            cfg,
+            results,
+            groups,
+            body_group,
+            handler_group,
+            diamond_merges,
+            fold_regions,
+            fold_root_to_merge,
+            copied_tails: HashSet::new(),
+            loops_stack: Vec::new(),
+            switch_depth: 0,
+            case_arm_ctx: Vec::new(),
+            sese_loop_headers: std::collections::HashSet::new(),
+            sese_exc_retry_headers: std::collections::HashSet::new(),
+            walk_depth: 0,
+            walk_visits_left: std::cell::Cell::new(
+                WALK_VISIT_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX),
+            ),
+            walk_deadline: WALK_DEADLINE.with(|c| c.get()),
+            copy_budget: std::cell::Cell::new(
+                BUDGET_OVERRIDE
+                    .with(|c| c.get())
+                    .or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32))
+                    .unwrap_or(512),
+            ),
+            final_fields: HashSet::new(),
+            postdom_ctx: std::cell::OnceCell::new(),
+            structuring_groups: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
     /// Immediate post-dominator of `entry` within `universe`. Delegates to the
     /// O(n) `immediate_postdom` (BFS nearest-confluence with successor-candidate
     /// rejection); kept as a `&mut self` method for call-site convenience.
-    pub(crate) fn postdom_ipdom(&mut self, universe: &HashSet<usize>, entry: usize) -> Option<usize> {
-        // Successor-candidate rejection exempts every GROUP-OWNED block
-        // (whole try bodies and handler heads, not just group starts):
-        // rejecting an in-body successor re-routes the COND walk across
-        // the carve-out boundary and dissolved
-        // HttpURLConnection.getInputStream0's inner try/catch (bare 'try'
-        // x3 sites x3 trees — the rejected taken target at pc 813 sits
-        // mid-range of the 283..1853 protected body), while the
-        // statement-block rejection outside groups (OCSP/Driver/
-        // AnnotationType families) stays.
-        let mut exempt: HashSet<usize> = self.handler_group.keys().copied().collect();
-        for g in &self.groups {
-            if let Some(b) = self.cfg.block_at(g.start) {
-                exempt.insert(b);
+    pub(crate) fn postdom_ipdom(
+        &mut self,
+        universe: &HashSet<usize>,
+        entry: usize,
+    ) -> Option<usize> {
+        // The exempt/terminators/final_writers/abrupt_only/stmt_counts
+        // sets below are METHOD-INVARIANT — every input is built in the
+        // constructor and never mutated afterwards (handler_group and
+        // groups are constructor-only, results/cfg are borrows, and
+        // final_fields stays empty inside the Structurer, so
+        // terminator_writes_final always returns false here) — yet this
+        // method rebuilt them all on EVERY call, and walk_inner consults
+        // it at every IF decision. Compute once, reuse forever; the
+        // computed values are byte-identical to the per-call recompute.
+        let ctx = self.postdom_ctx.get_or_init(|| {
+            // Successor-candidate rejection exempts every GROUP-OWNED
+            // block (whole try bodies and handler heads, not just
+            // group starts): rejecting an in-body successor re-routes
+            // the COND walk across the carve-out boundary and
+            // dissolved HttpURLConnection.getInputStream0's inner
+            // try/catch, while the statement-block rejection outside
+            // groups stays.
+            let mut exempt: HashSet<usize> = self.handler_group.keys().copied().collect();
+            for g in &self.groups {
+                if let Some(b) = self.cfg.block_at(g.start) {
+                    exempt.insert(b);
+                }
             }
-        }
+            let terminators: HashSet<usize> = (0..self.results.len())
+                .filter(|&b| self.is_terminator_block(b))
+                .collect();
+            let final_writers: HashSet<usize> = (0..self.results.len())
+                .filter(|&b| self.terminator_writes_final(b))
+                .collect();
+            // Blocks whose every CFG exit is abrupt (return/throw or
+            // none): a route landing there dies before any parked
+            // merge, so it never skips a shared RETURN tail.
+            let mut abrupt_only: HashSet<usize> = HashSet::new();
+            for b in 0..self.results.len() {
+                let term_abrupt = matches!(
+                    self.results[b].term,
+                    crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
+                );
+                let succs_abrupt = !self.cfg.blocks[b].succ.is_empty()
+                    && self.cfg.blocks[b]
+                        .succ
+                        .iter()
+                        .all(|&x| terminators.contains(&x));
+                if term_abrupt || succs_abrupt {
+                    abrupt_only.insert(b);
+                }
+            }
+            let stmt_counts: Vec<usize> = self.results.iter().map(|r| r.stmts.len()).collect();
+            PostdomCtx {
+                exempt,
+                terminators,
+                final_writers,
+                abrupt_only,
+                stmt_counts,
+            }
+        });
         let entry_group = self.body_group.get(&entry).copied();
-        let terminators: HashSet<usize> = (0..self.results.len())
-            .filter(|&b| self.is_terminator_block(b))
-            .collect();
-        let final_writers: HashSet<usize> = (0..self.results.len())
-            .filter(|&b| self.terminator_writes_final(b))
-            .collect();
-        // Blocks whose every CFG exit is abrupt (return/throw or none):
-        // a route landing there dies before any parked merge, so it
-        // never skips a shared RETURN tail (CHM.equals' method-final
-        // `return true` at pc 211 was rejected because the loop body's
-        // `return false` confluence cannot reach it — parking the tail
-        // is correct there; only DHKey's shared THROW needs the live
-        // skip route rejected).
-        let mut abrupt_only: HashSet<usize> = HashSet::new();
-        for b in 0..self.results.len() {
-            let term_abrupt = matches!(
-                self.results[b].term,
-                crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
-            );
-            let succs_abrupt = !self.cfg.blocks[b].succ.is_empty()
-                && self.cfg.blocks[b].succ.iter().all(|&x| terminators.contains(&x));
-            if term_abrupt || succs_abrupt {
-                abrupt_only.insert(b);
-            }
-        }
-        let stmt_counts: Vec<usize> = self.results.iter().map(|r| r.stmts.len()).collect();
-        immediate_postdom(self.cfg, self.results, universe, entry, &exempt, &stmt_counts, &self.body_group, entry_group, &terminators, &abrupt_only, &final_writers)
+        immediate_postdom(
+            self.cfg,
+            self.results,
+            universe,
+            entry,
+            &ctx.exempt,
+            &ctx.stmt_counts,
+            &self.body_group,
+            entry_group,
+            &ctx.terminators,
+            &ctx.abrupt_only,
+            &ctx.final_writers,
+        )
     }
-
 
     pub(crate) fn is_handler(&self, b: usize) -> bool {
         self.handler_group.contains_key(&b)
@@ -2033,31 +2291,31 @@ impl<'a> Structurer<'a> {
         })
     }
 
-/// Is `t` the header of a natural loop containing a back edge from `cur`-side
-/// flow? Approximation used by the walk's back-edge arm: `t` dominates the
-/// edge source (the arm's entry condition) AND some predecessor path of the
-/// current region loops — but the simple, robust signal here is: the Goto arm
-/// only runs when `dom.dominates(t, cur)` already held (see caller), so a
-/// terminator `t` that also has an incoming exc-handler back edge is a retry
-/// loop header. Callers pass the structurer for cfg access.
-fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
-    // EXACT retry idiom only: t's protected range is caught by a handler
-    // with no normal preds whose sole out-edge returns to t (Future
-    // .exceptionNow: range (40,57) caught at 57, `goto 40`). Broader
-    // "any handler flows to t" shapes matched shared RETURN tails whose
-    // arrivals legitimately need the terminator copy (jdk26 Resolver
-    // 缺少返回语句 x2 regression).
-    s.cfg.exc_edges.iter().any(|e| {
-        e.from == t
-            && e.to != t
-            && s.cfg.blocks[e.to].pred.is_empty()
-            && s.cfg.blocks[e.to].succ.len() == 1
-            && s.cfg.blocks[e.to].succ[0] == t
-    }) && matches!(
-        s.results[t].term,
-        crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
-    )
-}
+    /// Is `t` the header of a natural loop containing a back edge from `cur`-side
+    /// flow? Approximation used by the walk's back-edge arm: `t` dominates the
+    /// edge source (the arm's entry condition) AND some predecessor path of the
+    /// current region loops — but the simple, robust signal here is: the Goto arm
+    /// only runs when `dom.dominates(t, cur)` already held (see caller), so a
+    /// terminator `t` that also has an incoming exc-handler back edge is a retry
+    /// loop header. Callers pass the structurer for cfg access.
+    fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
+        // EXACT retry idiom only: t's protected range is caught by a handler
+        // with no normal preds whose sole out-edge returns to t (Future
+        // .exceptionNow: range (40,57) caught at 57, `goto 40`). Broader
+        // "any handler flows to t" shapes matched shared RETURN tails whose
+        // arrivals legitimately need the terminator copy (jdk26 Resolver
+        // 缺少返回语句 x2 regression).
+        s.cfg.exc_edges.iter().any(|e| {
+            e.from == t
+                && e.to != t
+                && s.cfg.blocks[e.to].pred.is_empty()
+                && s.cfg.blocks[e.to].succ.len() == 1
+                && s.cfg.blocks[e.to].succ[0] == t
+        }) && matches!(
+            s.results[t].term,
+            crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
+        )
+    }
 
     fn sub_scope(
         &self,
@@ -2108,10 +2366,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     continue;
                 }
                 for nb in &self.cfg.blocks {
-                    if nb.ins_len != 0
-                        && nb.start >= g.start
-                        && nb.end <= g.end.max(g.start + 1)
-                    {
+                    if nb.ins_len != 0 && nb.start >= g.start && nb.end <= g.end.max(g.start + 1) {
                         eff.insert(nb.id);
                     }
                 }
@@ -2207,7 +2462,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 // Future.exceptionNow's finally-group body walk rooted AT
                 // the protected-span start) has its back-edge source as a
                 // DIRECT exception successor: require that exact edge.
-                if !self.cfg.exc_edges.iter().any(|e| e.from == cur && e.to == p)
+                if !self
+                    .cfg
+                    .exc_edges
+                    .iter()
+                    .any(|e| e.from == cur && e.to == p)
                 {
                     return false;
                 }
@@ -2245,14 +2504,13 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // post-switch tail went unreachable — 无法访问的语句). The pred
         // only counts when it is reachable from `cur` WITHOUT passing
         // through the enclosing header (a genuine loop of `cur`).
-        let single_enclosing_succ = self.cfg.blocks[cur].succ.len() == 1
-            && {
-                let x = self.cfg.blocks[cur].succ[0];
-                x != cur
-                    && (self.loops_stack.contains(&x)
-                        || self.sese_loop_headers.contains(&x)
-                        || self.sese_exc_retry_headers.contains(&x))
-            };
+        let single_enclosing_succ = self.cfg.blocks[cur].succ.len() == 1 && {
+            let x = self.cfg.blocks[cur].succ[0];
+            x != cur
+                && (self.loops_stack.contains(&x)
+                    || self.sese_loop_headers.contains(&x)
+                    || self.sese_exc_retry_headers.contains(&x))
+        };
         // Exc-only-reachable preds (handlers and their downstream blocks)
         // never get a normal-flow dominator: compute_dominators' RPO walks
         // normal succ edges only, so such a block keeps the idom[p]==p
@@ -2288,14 +2546,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     let x = self.cfg.blocks[cur].succ[0];
                     let mut barriers: HashSet<usize> = HashSet::new();
                     barriers.insert(x);
-                    if !can_reach_cfg_barred(
-                        self.cfg,
-                        &HashMap::new(),
-                        cur,
-                        p,
-                        &barriers,
-                        8192,
-                    ) {
+                    if !can_reach_cfg_barred(self.cfg, &HashMap::new(), cur, p, &barriers, 8192) {
                         continue;
                     }
                 }
@@ -2362,7 +2613,14 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             .collect();
 
         let mut claimed = HashSet::new();
-        self.walk(self.cfg.entry, &universe, &HashSet::new(), &top_groups, &mut claimed, true)
+        self.walk(
+            self.cfg.entry,
+            &universe,
+            &HashSet::new(),
+            &top_groups,
+            &mut claimed,
+            true,
+        )
     }
 
     /// Walk a scope starting at `entry`.
@@ -2390,6 +2648,27 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         if self.walk_depth >= 256 {
             return Region::Goto { target: entry };
         }
+        // Wall-clock guard: bounds the visit-COST (not just the count) of
+        // pathological explorations — same Goto degradation as the depth
+        // guard, so conversion stays valid. None = off (jcdc never arms it).
+        if let Some(dl) = self.walk_deadline {
+            if std::time::Instant::now() >= dl {
+                return Region::Goto { target: entry };
+            }
+        }
+        // Visit budget: same degradation class once the exploration ran
+        // long. u64::MAX = off.
+        {
+            let left = self.walk_visits_left.get();
+            if left == 0 {
+                return Region::Goto { target: entry };
+            }
+            self.walk_visits_left.set(left - 1);
+            #[cfg(feature = "visit-stats")]
+            {
+                WALK_VISITS_TOTAL.with(|c| c.set(c.get() + 1));
+            }
+        }
         self.walk_depth += 1;
         let r = self.walk_inner(entry, universe, stop, active, claimed, allow_claimed_entry);
         self.walk_depth -= 1;
@@ -2414,7 +2693,10 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // loop recursively.
         let entry_preclaimed = claimed.contains(&entry);
         if crate::dbg_flag!("JCDC_DBG_IF") {
-            eprintln!("WALK entry={} universe={:?} stop={:?} claimed={:?}", entry, universe, stop, claimed);
+            eprintln!(
+                "WALK entry={} universe={:?} stop={:?} claimed={:?}",
+                entry, universe, stop, claimed
+            );
         }
         let mut parts: Vec<Region> = Vec::new();
         let mut cur = entry;
@@ -2437,7 +2719,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             if claimed.contains(&cur) && !(first && allow_claimed_entry) {
                 // Flow re-entered an already structured block.
                 if crate::dbg_flag!("JCDC_DBG_IF") {
-                    eprintln!("GOTO-CLAIMED cur={} entry={} parts={}", cur, entry, parts.len());
+                    eprintln!(
+                        "GOTO-CLAIMED cur={} entry={} parts={}",
+                        cur,
+                        entry,
+                        parts.len()
+                    );
                 }
                 if !parts.is_empty() {
                     if self.is_terminator_block(cur) && !stop.contains(&cur) {
@@ -2480,9 +2767,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                     && self.cfg.blocks[cur].succ.len() == 1
                                     && universe.contains(&self.cfg.blocks[cur].succ[0])
                                     && !stop.contains(&self.cfg.blocks[cur].succ[0])
-                                    && parts
-                                        .iter()
-                                        .any(|p| region_head_block(p) == self.cfg.blocks[cur].succ[0])
+                                    && parts.iter().any(|p| {
+                                        region_head_block(p) == self.cfg.blocks[cur].succ[0]
+                                    })
                                 {
                                     // Fall-into-sibling: `cur` is a
                                     // statement-free fallthrough whose
@@ -2508,9 +2795,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     } else {
                         parts.push(Region::Goto { target: cur });
                     }
-                } else if self.loops_stack.contains(&cur)
-                    || self.sese_loop_headers.contains(&cur)
-                {
+                } else if self.loops_stack.contains(&cur) || self.sese_loop_headers.contains(&cur) {
                     // An EMPTY region arriving at an enclosing loop header
                     // IS the back edge (jdk26 Future.exceptionNow's
                     // `catch (InterruptedException e) { interrupted =
@@ -2857,7 +3142,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
 
             claimed.insert(cur);
             if crate::dbg_flag!("JCDC_DBG_CLAIM") {
-                eprintln!("CLAIM blk={} entry={} term_is_cond={}", cur, entry, matches!(self.term(cur), Term::Cond{..}));
+                eprintln!(
+                    "CLAIM blk={} entry={} term_is_cond={}",
+                    cur,
+                    entry,
+                    matches!(self.term(cur), Term::Cond { .. })
+                );
             }
             match self.term(cur).clone() {
                 Term::Cond { cond } => {
@@ -2919,9 +3209,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     let mut follow = pd;
                     let follow_walkable = follow
                         .map(|f| {
-                            universe.contains(&f)
-                                && !stop.contains(&f)
-                                && !claimed.contains(&f)
+                            universe.contains(&f) && !stop.contains(&f) && !claimed.contains(&f)
                         })
                         .unwrap_or(false);
                     // Never fold an appendix at a pre-claimed loop header:
@@ -2990,7 +3278,8 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                             let mut vis_t: HashSet<usize> = HashSet::new();
                             let mut vis_f: HashSet<usize> = HashSet::new();
                             if self.diamond_side(taken, m, universe, &bstop, claimed, &mut vis_t, 0)
-                                && self.diamond_side(fall, m, universe, &bstop, claimed, &mut vis_f, 0)
+                                && self
+                                    .diamond_side(fall, m, universe, &bstop, claimed, &mut vis_f, 0)
                             {
                                 let mut vis = vis_t;
                                 vis.extend(vis_f);
@@ -3061,13 +3350,10 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                 && !self.loops_stack.contains(&fh)
                             {
                                 let exc_succ: HashMap<usize, Vec<usize>> =
-                                    self.cfg.exc_edges.iter().fold(
-                                        HashMap::new(),
-                                        |mut m, e| {
-                                            m.entry(e.from).or_default().push(e.to);
-                                            m
-                                        },
-                                    );
+                                    self.cfg.exc_edges.iter().fold(HashMap::new(), |mut m, e| {
+                                        m.entry(e.from).or_default().push(e.to);
+                                        m
+                                    });
                                 let mut barriers: HashSet<usize> = HashSet::new();
                                 barriers.insert(fh);
                                 barriers.insert(cur);
@@ -3078,12 +3364,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                 }
                                 barriers.extend(stop.iter().copied());
                                 if can_reach_cfg_barred(
-                                    self.cfg,
-                                    &exc_succ,
-                                    taken,
-                                    fh,
-                                    &barriers,
-                                    8192,
+                                    self.cfg, &exc_succ, taken, fh, &barriers, 8192,
                                 ) {
                                     follow = Some(fh);
                                     bstop.insert(fh);
@@ -3164,7 +3445,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         } else {
                             Region::Goto { target: taken }
                         }
-                    } else if let Some(absorbed) = self.absorb_pure(taken, universe, &bstop, claimed, active) {
+                    } else if let Some(absorbed) =
+                        self.absorb_pure(taken, universe, &bstop, claimed, active)
+                    {
                         absorbed
                     } else if universe.contains(&taken)
                         && !bstop.contains(&taken)
@@ -3314,7 +3597,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         } else {
                             Region::Goto { target: fall }
                         }
-                    } else if let Some(absorbed) = self.absorb_pure(fall, universe, &bstop, claimed, active) {
+                    } else if let Some(absorbed) =
+                        self.absorb_pure(fall, universe, &bstop, claimed, active)
+                    {
                         absorbed
                     } else if Some(taken) == follow
                         && !stop.contains(&taken)
@@ -3383,9 +3668,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         let mut jump_exempt: HashSet<usize> = HashSet::new();
                         Region::jump_targets(&arm, &mut jump_exempt);
                         jump_exempt.extend(self.loops_stack.iter().copied());
-                        jump_exempt.extend(
-                            self.case_arm_ctx.iter().filter_map(|c| c.1),
-                        );
+                        jump_exempt.extend(self.case_arm_ctx.iter().filter_map(|c| c.1));
                         jump_exempt.extend(bstop.iter().copied());
                         let bypass = Region::bypasses_exempt(&arm, taken, &jump_exempt);
                         // The parked chain: statement blocks flowing from
@@ -3431,7 +3714,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         }
                         if chain.is_empty() {
                             if crate::dbg_flag!("JCDC_DBG_IF") {
-                                eprintln!("PARKCHAIN cur={} chain=EMPTY arm={}", cur, region_shape(&arm));
+                                eprintln!(
+                                    "PARKCHAIN cur={} chain=EMPTY arm={}",
+                                    cur,
+                                    region_shape(&arm)
+                                );
                             }
                             arm
                         } else {
@@ -3495,7 +3782,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                             if crate::dbg_flag!("JCDC_DBG_IF") {
                                 eprintln!(
                                     "PARKCHAIN cur={} chain={:?} cu={} cstop={:?} taken_r={}",
-                                    cur, chain, cu.len(), cstop, region_shape(&taken_r)
+                                    cur,
+                                    chain,
+                                    cu.len(),
+                                    cstop,
+                                    region_shape(&taken_r)
                                 );
                             }
                             // Accept only SIMPLE completions (linear
@@ -3516,8 +3807,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                     | Region::Goto { .. } => true,
                                     Region::Seq(v) => v.iter().all(simple_completion),
                                     Region::If { then_r, else_r, .. } => {
-                                        simple_completion(then_r)
-                                            && simple_completion(else_r)
+                                        simple_completion(then_r) && simple_completion(else_r)
                                     }
                                     _ => false,
                                 }
@@ -3547,7 +3837,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                     match r {
                                         Region::Goto { target } => out.push(*target),
                                         Region::Seq(v) => {
-                                            if let Some(l) = v.last() { bypass_targets(l, out); }
+                                            if let Some(l) = v.last() {
+                                                bypass_targets(l, out);
+                                            }
                                         }
                                         Region::If { then_r, else_r, .. } => {
                                             bypass_targets(then_r, out);
@@ -3555,7 +3847,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                         }
                                         Region::Try { body, catches, .. } => {
                                             bypass_targets(body, out);
-                                            for (_, _, h) in catches { bypass_targets(h, out); }
+                                            for (_, _, h) in catches {
+                                                bypass_targets(h, out);
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -3611,130 +3905,134 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                             // a trailing-Goto copy must keep the strict
                             // all-bts-equal-cont coherence above).
                             if crate::dbg_flag!("JCDC_DBG_IF") {
-                                eprintln!("PARKC-ARM cur={} taken={} bts={:?} arm={}", cur, taken, bts, region_shape(&arm));
+                                eprintln!(
+                                    "PARKC-ARM cur={} taken={} bts={:?} arm={}",
+                                    cur,
+                                    taken,
+                                    bts,
+                                    region_shape(&arm)
+                                );
                             }
-                                    fn fill_bypass(
-                                        st: &mut Structurer,
-                                        r: &mut Region,
-                                        copy: &Region,
-                                        taken: usize,
-                                        cu2: &HashSet<usize>,
-                                        cstop: &HashSet<usize>,
-                                        active: &[usize],
-                                        claimed: &HashSet<usize>,
-                                        filled: &mut usize,
-                                        failed: &mut bool,
-                                        top: bool,
-                                    ) {
-                                        match r {
-                                            Region::Seq(v) => {
-                                                let n = v.len();
-                                                for i in 0..n {
-                                                    let is_last = i + 1 == n;
-                                                    if is_last {
-                                                        let goto_t = match &v[i] {
-                                                            Region::Goto { target } => Some(*target),
-                                                            _ => None,
-                                                        };
-                                                        if let Some(t) = goto_t {
-                                                            if t == taken && !top {
-                                                                // Deep If-arm tail jumping to the
-                                                                // chain head: own copy of the chain.
-                                                                if st.take_copy_ticket() {
-                                                                    v[i] = copy.clone();
-                                                                    *filled += 1;
-                                                                }
-                                                                continue;
-                                                            }
-                                                            if t != taken
-                                                                && bypass_flows_to(
-                                                                    st.cfg, t, taken, cstop,
-                                                                )
-                                                            {
-                                                                // Arm tail flowing into the chain:
-                                                                // fresh walk from t; drop a
-                                                                // preceding CopyStmts{t} (the fresh
-                                                                // Basic(t) supersedes it).
-                                                                let mut sc = claimed.clone();
-                                                                let sub = if st.take_copy_ticket() {
-                                                                    st.walk(
-                                                                        t, cu2, cstop, active,
-                                                                        &mut sc, false,
-                                                                    )
-                                                                } else {
-                                                                    Region::Empty
-                                                                };
-                                                                if !matches!(sub, Region::Empty)
-                                                                    && simple_completion_local2(&sub)
-                                                                    && region_terminates_ex(
-                                                                        &sub, st.results, &[],
-                                                                    )
-                                                                {
-                                                                    v[i] = sub;
-                                                                    if n >= 2 {
-                                                                        if let Region::CopyStmts {
-                                                                            block,
-                                                                        } = &v[i - 1]
-                                                                        {
-                                                                            if *block == t {
-                                                                                v[i - 1] =
-                                                                                    Region::Empty;
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    *filled += 1;
-                                                                } else {
-                                                                    *failed = true;
-                                                                }
-                                                                continue;
-                                                            }
+                            fn fill_bypass(
+                                st: &mut Structurer,
+                                r: &mut Region,
+                                copy: &Region,
+                                taken: usize,
+                                cu2: &HashSet<usize>,
+                                cstop: &HashSet<usize>,
+                                active: &[usize],
+                                claimed: &HashSet<usize>,
+                                filled: &mut usize,
+                                failed: &mut bool,
+                                top: bool,
+                            ) {
+                                match r {
+                                    Region::Seq(v) => {
+                                        let n = v.len();
+                                        for i in 0..n {
+                                            let is_last = i + 1 == n;
+                                            if is_last {
+                                                let goto_t = match &v[i] {
+                                                    Region::Goto { target } => Some(*target),
+                                                    _ => None,
+                                                };
+                                                if let Some(t) = goto_t {
+                                                    if t == taken && !top {
+                                                        // Deep If-arm tail jumping to the
+                                                        // chain head: own copy of the chain.
+                                                        if st.take_copy_ticket() {
+                                                            v[i] = copy.clone();
+                                                            *filled += 1;
                                                         }
+                                                        continue;
                                                     }
-                                                    fill_bypass(
-                                                        st, &mut v[i], copy, taken, cu2, cstop,
-                                                        active, claimed, filled, failed, false,
-                                                    );
+                                                    if t != taken
+                                                        && bypass_flows_to(st.cfg, t, taken, cstop)
+                                                    {
+                                                        // Arm tail flowing into the chain:
+                                                        // fresh walk from t; drop a
+                                                        // preceding CopyStmts{t} (the fresh
+                                                        // Basic(t) supersedes it).
+                                                        let mut sc = claimed.clone();
+                                                        let sub = if st.take_copy_ticket() {
+                                                            st.walk(
+                                                                t, cu2, cstop, active, &mut sc,
+                                                                false,
+                                                            )
+                                                        } else {
+                                                            Region::Empty
+                                                        };
+                                                        if !matches!(sub, Region::Empty)
+                                                            && simple_completion_local2(&sub)
+                                                            && region_terminates_ex(
+                                                                &sub,
+                                                                st.results,
+                                                                &[],
+                                                            )
+                                                        {
+                                                            v[i] = sub;
+                                                            if n >= 2 {
+                                                                if let Region::CopyStmts { block } =
+                                                                    &v[i - 1]
+                                                                {
+                                                                    if *block == t {
+                                                                        v[i - 1] = Region::Empty;
+                                                                    }
+                                                                }
+                                                            }
+                                                            *filled += 1;
+                                                        } else {
+                                                            *failed = true;
+                                                        }
+                                                        continue;
+                                                    }
                                                 }
                                             }
-                                            Region::If { then_r, else_r, .. } => {
-                                                fill_bypass(
-                                                    st, then_r, copy, taken, cu2, cstop, active,
-                                                    claimed, filled, failed, false,
-                                                );
-                                                fill_bypass(
-                                                    st, else_r, copy, taken, cu2, cstop, active,
-                                                    claimed, filled, failed, false,
-                                                );
-                                            }
-                                            Region::Try { body, catches, .. } => {
-                                                fill_bypass(
-                                                    st, body, copy, taken, cu2, cstop, active,
-                                                    claimed, filled, failed, false,
-                                                );
-                                                for (_, _, h) in catches.iter_mut() {
-                                                    fill_bypass(
-                                                        st, h, copy, taken, cu2, cstop, active,
-                                                        claimed, filled, failed, false,
-                                                    );
-                                                }
-                                            }
-                                            _ => {}
+                                            fill_bypass(
+                                                st, &mut v[i], copy, taken, cu2, cstop, active,
+                                                claimed, filled, failed, false,
+                                            );
                                         }
                                     }
-                                    fn simple_completion_local2(r: &Region) -> bool {
-                                        match r {
-                                            Region::Basic { .. }
-                                            | Region::CopyStmts { .. }
-                                            | Region::Empty
-                                            | Region::Goto { .. } => true,
-                                            Region::Seq(v) => v.iter().all(simple_completion_local2),
-                                            Region::If { then_r, else_r, .. } => {
-                                                simple_completion_local2(then_r)
-                                                    && simple_completion_local2(else_r)
-                                            }
-                                            _ => false,
+                                    Region::If { then_r, else_r, .. } => {
+                                        fill_bypass(
+                                            st, then_r, copy, taken, cu2, cstop, active, claimed,
+                                            filled, failed, false,
+                                        );
+                                        fill_bypass(
+                                            st, else_r, copy, taken, cu2, cstop, active, claimed,
+                                            filled, failed, false,
+                                        );
+                                    }
+                                    Region::Try { body, catches, .. } => {
+                                        fill_bypass(
+                                            st, body, copy, taken, cu2, cstop, active, claimed,
+                                            filled, failed, false,
+                                        );
+                                        for (_, _, h) in catches.iter_mut() {
+                                            fill_bypass(
+                                                st, h, copy, taken, cu2, cstop, active, claimed,
+                                                filled, failed, false,
+                                            );
                                         }
                                     }
+                                    _ => {}
+                                }
+                            }
+                            fn simple_completion_local2(r: &Region) -> bool {
+                                match r {
+                                    Region::Basic { .. }
+                                    | Region::CopyStmts { .. }
+                                    | Region::Empty
+                                    | Region::Goto { .. } => true,
+                                    Region::Seq(v) => v.iter().all(simple_completion_local2),
+                                    Region::If { then_r, else_r, .. } => {
+                                        simple_completion_local2(then_r)
+                                            && simple_completion_local2(else_r)
+                                    }
+                                    _ => false,
+                                }
+                            }
                             let routed = {
                                 coherent
                                     && !matches!(taken_r, Region::Empty)
@@ -3936,8 +4234,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                                             }
                                                         }),
                                                     other => {
-                                                        if crate::structure::region_head_block(other)
-                                                            == *target
+                                                        if crate::structure::region_head_block(
+                                                            other,
+                                                        ) == *target
                                                         {
                                                             Some(other.clone())
                                                         } else {
@@ -3960,7 +4259,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                                         if !matches!(sub, Region::Empty)
                                                             && simple_completion_local(&sub)
                                                             && region_terminates_ex(
-                                                                &sub, st.results, &[],
+                                                                &sub,
+                                                                st.results,
+                                                                &[],
                                                             )
                                                         {
                                                             Some(sub)
@@ -3974,7 +4275,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                                     *filled += 1;
                                                 }
                                             }
-                                            Region::If { block, then_r, else_r, .. } => {
+                                            Region::If {
+                                                block,
+                                                then_r,
+                                                else_r,
+                                                ..
+                                            } => {
                                                 let succ = st.cfg.blocks[*block].succ.clone();
                                                 if succ.len() == 2 {
                                                     let pairs = [
@@ -4012,14 +4318,25 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                                                 Some(x) => Some(x),
                                                                 None => {
                                                                     let mut sc = claimed.clone();
-                                                                    let sub = if st.take_copy_ticket() {
-                                                                        st.walk(tgt, cu, cstop, active, &mut sc, false)
+                                                                    let sub = if st
+                                                                        .take_copy_ticket()
+                                                                    {
+                                                                        st.walk(
+                                                                            tgt, cu, cstop, active,
+                                                                            &mut sc, false,
+                                                                        )
                                                                     } else {
                                                                         Region::Empty
                                                                     };
                                                                     if !matches!(sub, Region::Empty)
-                                                                        && simple_completion_local(&sub)
-                                                                        && region_terminates_ex(&sub, st.results, &[])
+                                                                        && simple_completion_local(
+                                                                            &sub,
+                                                                        )
+                                                                        && region_terminates_ex(
+                                                                            &sub,
+                                                                            st.results,
+                                                                            &[],
+                                                                        )
                                                                     {
                                                                         Some(sub)
                                                                     } else {
@@ -4174,7 +4491,10 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         if crate::dbg_flag!("JCDC_DBG_IF") {
                             eprintln!(
                                 "IF cur={} else Empty fall={} univ={} bstop={} handler={}",
-                                cur, fall, universe.contains(&fall), bstop.contains(&fall),
+                                cur,
+                                fall,
+                                universe.contains(&fall),
+                                bstop.contains(&fall),
                                 self.is_handler(fall)
                             );
                         }
@@ -4184,7 +4504,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     // (no statements, no exits) and leave exactly one value.
                     // A branch may be `Basic` or `Seq[Basic, Goto{follow}]`
                     // (javac often uses an explicit goto to the merge).
-                    fn pure_block(r: &crate::ir::build::BlockResult, succs: &[usize], follow: Option<usize>) -> bool {
+                    fn pure_block(
+                        r: &crate::ir::build::BlockResult,
+                        succs: &[usize],
+                        follow: Option<usize>,
+                    ) -> bool {
                         r.stmts.is_empty()
                             && r.out_stack.len() == 1
                             && match &r.term {
@@ -4195,7 +4519,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                 _ => false,
                             }
                     }
-                    fn region_pure_block(rg: &Region, results: &Vec<BlockResult>, cfg: &Cfg, follow: Option<usize>) -> Option<usize> {
+                    fn region_pure_block(
+                        rg: &Region,
+                        results: &Vec<BlockResult>,
+                        cfg: &Cfg,
+                        follow: Option<usize>,
+                    ) -> Option<usize> {
                         match rg {
                             Region::Basic { block } => {
                                 if pure_block(&results[*block], &cfg.blocks[*block].succ, follow) {
@@ -4205,9 +4534,15 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                 }
                             }
                             Region::Seq(v) if v.len() == 2 => {
-                                if let (Region::Basic { block }, Region::Goto { target }) = (&v[0], &v[1]) {
+                                if let (Region::Basic { block }, Region::Goto { target }) =
+                                    (&v[0], &v[1])
+                                {
                                     if follow == Some(*target)
-                                        && pure_block(&results[*block], &cfg.blocks[*block].succ, follow)
+                                        && pure_block(
+                                            &results[*block],
+                                            &cfg.blocks[*block].succ,
+                                            follow,
+                                        )
                                     {
                                         return Some(*block);
                                     }
@@ -4258,7 +4593,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         ternary,
                     });
                     match follow {
-                        Some(f) if universe.contains(&f) && !stop.contains(&f) && !claimed.contains(&f) => {
+                        Some(f)
+                            if universe.contains(&f)
+                                && !stop.contains(&f)
+                                && !claimed.contains(&f) =>
+                        {
                             cur = f;
                             continue;
                         }
@@ -4287,21 +4626,18 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                             // to the header — conversion resolves it to
                             // `continue`; a fall-through must NOT reach
                             // the head (it would re-run the loop test).
-                            let stub_header =
-                                if matches!(self.results[f].term, Term::Goto)
-                                    && self.cfg.blocks[f].succ.len() == 1
-                                {
-                                    let t = self.cfg.blocks[f].succ[0];
-                                    self.loops_stack
-                                        .iter()
-                                        .chain(self.sese_loop_headers.iter())
-                                        .find(|&&h| {
-                                            h == t || self.is_stmt_free_chain_to_block(t, h)
-                                        })
-                                        .copied()
-                                } else {
-                                    None
-                                };
+                            let stub_header = if matches!(self.results[f].term, Term::Goto)
+                                && self.cfg.blocks[f].succ.len() == 1
+                            {
+                                let t = self.cfg.blocks[f].succ[0];
+                                self.loops_stack
+                                    .iter()
+                                    .chain(self.sese_loop_headers.iter())
+                                    .find(|&&h| h == t || self.is_stmt_free_chain_to_block(t, h))
+                                    .copied()
+                            } else {
+                                None
+                            };
                             if let Some(h) = stub_header {
                                 parts.push(Region::Seq(vec![
                                     Region::CopyStmts { block: f },
@@ -4321,13 +4657,18 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         _ => break,
                     }
                 }
-                Term::Switch { selector, targets , default: _ } => {
+                Term::Switch {
+                    selector,
+                    targets,
+                    default: _,
+                } => {
                     // A switch's follow is the confluence of the cases that
                     // do NOT terminate (return/throw). `immediate_postdom`
                     // would yield None whenever any case always exits (e.g.
                     // a throwing default), losing break resolution for the
                     // remaining cases.
-                    let follow = self.postdom_ipdom(universe, cur)
+                    let follow = self
+                        .postdom_ipdom(universe, cur)
                         .or_else(|| self.switch_follow(cur, universe))
                         // Inside a copied/shared-tail region the confluence
                         // sits in `stop` (the enclosing flow owns it), so
@@ -4367,7 +4708,16 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     };
                     self.switch_depth += 1;
                     let claimed_save = claimed.clone();
-                    let mut sw = self.structure_switch(cur, selector.clone(), &targets, universe, stop, region_follow, active, claimed);
+                    let mut sw = self.structure_switch(
+                        cur,
+                        selector.clone(),
+                        &targets,
+                        universe,
+                        stop,
+                        region_follow,
+                        active,
+                        claimed,
+                    );
                     if let Some(f) = crossing {
                         // What this scope does RIGHT AFTER the switch must
                         // already land on `f`: either the scope's earlier
@@ -4405,7 +4755,16 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         }
                         if bindable {
                             *claimed = claimed_save;
-                            sw = self.structure_switch(cur, selector, &targets, universe, stop, Some(f), active, claimed);
+                            sw = self.structure_switch(
+                                cur,
+                                selector,
+                                &targets,
+                                universe,
+                                stop,
+                                Some(f),
+                                active,
+                                claimed,
+                            );
                         }
                     }
                     self.switch_depth -= 1;
@@ -4446,7 +4805,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     }
                     parts.push(sw);
                     match follow {
-                        Some(f) if universe.contains(&f) && !stop.contains(&f) && !claimed.contains(&f) => {
+                        Some(f)
+                            if universe.contains(&f)
+                                && !stop.contains(&f)
+                                && !claimed.contains(&f) =>
+                        {
                             cur = f;
                             continue;
                         }
@@ -4468,8 +4831,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                             cur = t;
                             continue;
                         }
-                        Some(t) if universe.contains(&t) && !stop.contains(&t)
-                            && claimed.contains(&t) && dom.dominates(t, cur) => {
+                        Some(t)
+                            if universe.contains(&t)
+                                && !stop.contains(&t)
+                                && claimed.contains(&t)
+                                && dom.dominates(t, cur) =>
+                        {
                             // Back edge into an already-structured block:
                             // emit statements + goto (→ continue/break).
                             parts.push(Region::Basic { block: cur });
@@ -4489,7 +4856,10 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                 // into the catch — 未报告的异常错误
                                 // InterruptedException).
                                 parts.push(Region::CopyStmts { block: t });
-                            } else if !stop.contains(&t) && !self.loops_stack.contains(&t) && !Self::ctx_is_loop_header(self, t) {
+                            } else if !stop.contains(&t)
+                                && !self.loops_stack.contains(&t)
+                                && !Self::ctx_is_loop_header(self, t)
+                            {
                                 match self.copy_walk(t, stop, active, cur) {
                                     Some(r) => parts.push(r),
                                     None => parts.push(Region::Goto { target: t }),
@@ -4501,7 +4871,15 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         }
                         Some(t) => {
                             if crate::dbg_flag!("JCDC_DBG_IF") {
-                                eprintln!("GOTO-FALL cur={} t={} univ={} stop={} claimed={} entry={}", cur, t, universe.contains(&t), stop.contains(&t), claimed.contains(&t), entry);
+                                eprintln!(
+                                    "GOTO-FALL cur={} t={} univ={} stop={} claimed={} entry={}",
+                                    cur,
+                                    t,
+                                    universe.contains(&t),
+                                    stop.contains(&t),
+                                    claimed.contains(&t),
+                                    entry
+                                );
                             }
 
                             parts.push(Region::Basic { block: cur });
@@ -4592,7 +4970,15 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         Some(n) if self.is_handler(n) && active.is_empty() => break,
                         Some(n) => {
                             if crate::dbg_flag!("JCDC_DBG_IF") {
-                                eprintln!("GOTO-FT cur={} n={} univ={} stop={} claimed={} entry={}", cur, n, universe.contains(&n), stop.contains(&n), claimed.contains(&n), entry);
+                                eprintln!(
+                                    "GOTO-FT cur={} n={} univ={} stop={} claimed={} entry={}",
+                                    cur,
+                                    n,
+                                    universe.contains(&n),
+                                    stop.contains(&n),
+                                    claimed.contains(&n),
+                                    entry
+                                );
                             }
                             // Shared-tail arrival: `n` is CLAIMED (hence
                             // out of this walk's universe — sub_scope
@@ -4656,7 +5042,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             }
         }
         if crate::dbg_flag!("JCDC_DBG_IF") {
-            eprintln!("WALK END entry={} nparts={} claimed={:?}", entry, parts.len(), claimed);
+            eprintln!(
+                "WALK END entry={} nparts={} claimed={:?}",
+                entry,
+                parts.len(),
+                claimed
+            );
         }
         match parts.len() {
             0 => Region::Empty,
@@ -4742,12 +5133,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
     /// True when normal flow from `from` (within `universe`) reaches the
     /// START block of `target_gi`: the arm walk will arrive there and
     /// structure the group itself.
-    fn arm_flow_reaches(
-        &self,
-        from: usize,
-        target_gi: usize,
-        universe: &HashSet<usize>,
-    ) -> bool {
+    fn arm_flow_reaches(&self, from: usize, target_gi: usize, universe: &HashSet<usize>) -> bool {
         let gstart = self.groups[target_gi].start;
         let mut start_blk: Option<usize> = None;
         for nb in &self.cfg.blocks {
@@ -4756,7 +5142,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 break;
             }
         }
-        let Some(target) = start_blk else { return false };
+        let Some(target) = start_blk else {
+            return false;
+        };
         let mut seen: HashSet<usize> = HashSet::new();
         let mut q: VecDeque<usize> = VecDeque::new();
         q.push_back(from);
@@ -4881,15 +5269,15 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 }
                 let mut x = og.end;
                 for _ in 0..8 {
-                    let Some(bid) = self.cfg.block_at(x) else { break };
+                    let Some(bid) = self.cfg.block_at(x) else {
+                        break;
+                    };
                     if self.body_group.contains_key(&bid) {
                         break;
                     }
                     adopt.push(bid);
                     let nxt = match self.results[bid].term {
-                        Term::Fallthrough | Term::Goto
-                            if self.cfg.blocks[bid].succ.len() == 1 =>
-                        {
+                        Term::Fallthrough | Term::Goto if self.cfg.blocks[bid].succ.len() == 1 => {
                             self.cfg.blocks[bid].succ[0]
                         }
                         _ => break,
@@ -4974,7 +5362,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 Some(_) => return None,
             }
         }
-        if saw_live { common } else { None }
+        if saw_live {
+            common
+        } else {
+            None
+        }
     }
 
     /// For a NESTED switch whose confluence `f` is a stop block owned by
@@ -5011,8 +5403,16 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // The default arm's target comes from the terminator (the JVM
         // records it in the switch payload, DEX in the payload table).
         let default_pc = match self.results.get(block).map(|r| &r.term) {
-            Some(Term::Switch { targets: SwitchTargets::Table { .. }, default: Some(d), .. })
-            | Some(Term::Switch { targets: SwitchTargets::Lookup { .. }, default: Some(d), .. }) => *d,
+            Some(Term::Switch {
+                targets: SwitchTargets::Table { .. },
+                default: Some(d),
+                ..
+            })
+            | Some(Term::Switch {
+                targets: SwitchTargets::Lookup { .. },
+                default: Some(d),
+                ..
+            }) => *d,
             _ => return false,
         };
         // The default route: the rendered default region must itself bind
@@ -5035,14 +5435,22 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             }
             let ok = self.arm_binds_to(r, f);
             if crate::dbg_flag!("JCDC_DBG_SWF") {
-                eprintln!("SWBIND-CASE i={} block={} f={} ok={} region={:?}", i,
-                    region_head_block(r), f, ok, region_shape(r));
+                eprintln!(
+                    "SWBIND-CASE i={} block={} f={} ok={} region={:?}",
+                    i,
+                    region_head_block(r),
+                    f,
+                    ok,
+                    region_shape(r)
+                );
             }
             ok
         });
         if crate::dbg_flag!("JCDC_DBG_SWF") {
-            eprintln!("SWBIND-DEF block={} default_pc={} f={} default_ok={} cases_ok={}",
-                block, default_pc, f, default_ok, cases_ok);
+            eprintln!(
+                "SWBIND-DEF block={} default_pc={} f={} default_ok={} cases_ok={}",
+                block, default_pc, f, default_ok, cases_ok
+            );
         }
         default_ok && cases_ok
     }
@@ -5056,10 +5464,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             Region::Basic { .. } => true,
             Region::Goto { target } => *target == f,
             Region::Empty => false,
-            Region::Seq(v) => v
-                .last()
-                .map(|x| self.arm_binds_to(x, f))
-                .unwrap_or(false),
+            Region::Seq(v) => v.last().map(|x| self.arm_binds_to(x, f)).unwrap_or(false),
             Region::If { then_r, else_r, .. } => {
                 self.arm_binds_to(then_r, f) && self.arm_binds_to(else_r, f)
             }
@@ -5106,9 +5511,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             match &self.results[b].term {
                 Term::Cond { .. } | Term::Switch { .. } => return true,
                 Term::Return(_) | Term::Throw(_) => return false,
-                Term::Fallthrough | Term::Goto
-                    if self.cfg.blocks[b].succ.len() == 1 =>
-                {
+                Term::Fallthrough | Term::Goto if self.cfg.blocks[b].succ.len() == 1 => {
                     let n = self.cfg.blocks[b].succ[0];
                     if n == e || stop.contains(&n) || self.loops_stack.contains(&n) {
                         return false;
@@ -5297,7 +5700,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     && !in_nested_switch(cand, d)
                     && !diamond_merge(cand, d)
                     && !private_terminator_merge(cand, d)
-                    && best.map(|b| self.cfg.blocks[cand].start < self.cfg.blocks[b].start).unwrap_or(true)
+                    && best
+                        .map(|b| self.cfg.blocks[cand].start < self.cfg.blocks[b].start)
+                        .unwrap_or(true)
                 {
                     best = Some(cand);
                 }
@@ -5325,7 +5730,8 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     None => true,
                     Some((bd, bc)) => {
                         total < bd
-                            || (total == bd && self.cfg.blocks[cand].start < self.cfg.blocks[bc].start)
+                            || (total == bd
+                                && self.cfg.blocks[cand].start < self.cfg.blocks[bc].start)
                     }
                 };
                 if better {
@@ -5411,10 +5817,8 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 .filter(|&x| x != t && self.shared_tail_confluence(x))
                 .filter(|&x| {
                     !allow
-                        || !(matches!(
-                            self.results[x].term,
-                            crate::ir::build::Term::Switch { .. }
-                        ) || self.confluence_closure_small(x, &barriers))
+                        || !(matches!(self.results[x].term, crate::ir::build::Term::Switch { .. })
+                            || self.confluence_closure_small(x, &barriers))
                 })
                 .collect();
             barriers.extend(extra);
@@ -5474,10 +5878,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
     /// True when the block ends in a return/throw (a shared terminator that
     /// can be safely duplicated at each arrival site).
     pub(crate) fn is_terminator_block(&self, b: usize) -> bool {
-        matches!(
-            self.results[b].term,
-            Term::Return(_) | Term::Throw(_)
-        )
+        matches!(self.results[b].term, Term::Return(_) | Term::Throw(_))
     }
 
     /// True when `b` reaches some method Return through normal edges
@@ -5706,9 +6107,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // try/catch(PrivilegedActionException) into the `if (p == null)`
         // else arm — 未报告的异常错误PrivilegedActionException).
         let blk_start = self.cfg.blocks[blk].start;
-        if self.groups.iter().enumerate().any(|(gi, g)| {
-            g.start == blk_start && active.contains(&gi)
-        }) {
+        if self
+            .groups
+            .iter()
+            .enumerate()
+            .any(|(gi, g)| g.start == blk_start && active.contains(&gi))
+        {
             return None;
         }
         let dbg_absorb = crate::dbg_flag!("JCDC_DBG_ABSORB");
@@ -5718,14 +6122,22 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             let r = &self.results[blk];
             if b.ins_len == 0 || b.succ.len() != 1 {
                 if dbg_absorb {
-                    eprintln!("absorb EARLY blk={} ins={} succ={} out={}", blk, b.ins_len == 0, b.succ.len(), r.out_stack.len());
+                    eprintln!(
+                        "absorb EARLY blk={} ins={} succ={} out={}",
+                        blk,
+                        b.ins_len == 0,
+                        b.succ.len(),
+                        r.out_stack.len()
+                    );
                 }
                 return None;
             }
             // Statements must be empty or only stack-merge stores.
             let stmts_ok = r.stmts.iter().all(|st| match st {
                 crate::ir::stmt::Stmt::LocalDef { init: Some(_), .. } => true,
-                crate::ir::stmt::Stmt::ExprStmt(crate::ir::expr::Expr::Assign { target, .. }) => {
+                crate::ir::stmt::Stmt::ExprStmt(crate::ir::expr::Expr::Assign {
+                    target, ..
+                }) => {
                     matches!(&**target, crate::ir::expr::Expr::Local { .. })
                 }
                 _ => false,
@@ -5744,14 +6156,21 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         }
         if succ_walkable {
             if crate::dbg_flag!("JCDC_DBG_ABSORB") {
-                eprintln!("absorb REJECT blk={} succ walkable (univ={}, bstop={})", blk,
+                eprintln!(
+                    "absorb REJECT blk={} succ walkable (univ={}, bstop={})",
+                    blk,
                     universe.contains(&self.cfg.blocks[blk].succ[0]),
-                    bstop.contains(&self.cfg.blocks[blk].succ[0]));
+                    bstop.contains(&self.cfg.blocks[blk].succ[0])
+                );
             }
             return None; // normal flow continues; not our case
         }
         if crate::dbg_flag!("JCDC_DBG_ABSORB") {
-            eprintln!("absorb ACCEPT blk={} claimed={}", blk, claimed.contains(&blk));
+            eprintln!(
+                "absorb ACCEPT blk={} claimed={}",
+                blk,
+                claimed.contains(&blk)
+            );
         }
         // The unwalkable successor is an already-CLAIMED block this arm's
         // normal walk would inline-copy (the shared `registry.add(key);
@@ -5772,8 +6191,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // cont==hb strip (gate-matrix verified).
         {
             let succ = self.cfg.blocks[blk].succ[0];
-            let succ_owned_cont =
-                self.is_cont_of_active_group(succ, bstop, claimed, active);
+            let succ_owned_cont = self.is_cont_of_active_group(succ, bstop, claimed, active);
             if claimed.contains(&succ)
                 && !succ_owned_cont
                 && !bstop.contains(&succ)
@@ -5828,7 +6246,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 let t = x + y;
                 let better = match best {
                     None => true,
-                    Some((bt, bc)) => t < bt || (t == bt && self.cfg.blocks[c].start < self.cfg.blocks[bc].start),
+                    Some((bt, bc)) => {
+                        t < bt || (t == bt && self.cfg.blocks[c].start < self.cfg.blocks[bc].start)
+                    }
                 };
                 if better {
                     best = Some((t, c));
@@ -5860,7 +6280,10 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             let pure = b.ins_len != 0
                 && r.stmts.is_empty()
                 && !r.out_stack.is_empty()
-                && matches!(r.term, crate::ir::build::Term::Fallthrough | crate::ir::build::Term::Goto)
+                && matches!(
+                    r.term,
+                    crate::ir::build::Term::Fallthrough | crate::ir::build::Term::Goto
+                )
                 && b.succ.len() == 1;
             if !pure {
                 return Some(cur);
@@ -5876,7 +6299,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
     /// pure value producers (no statements; terminals are fallthrough or
     /// goto), possibly via nested diamond headers. All traversed blocks are
     /// added to `visited` so the caller can claim them.
-#[allow(dead_code)]
+    #[allow(dead_code)]
     fn branches_are_diamond(
         &self,
         a: usize,
@@ -5949,8 +6372,17 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     let s0 = b.succ[0];
                     let s1 = b.succ[1];
                     let mut v2 = HashSet::new();
-                    let ok = self.diamond_side(s0, merge, universe, stop, claimed, &mut v2, depth + 1)
-                        && self.diamond_side(s1, merge, universe, stop, claimed, &mut v2, depth + 1);
+                    let ok =
+                        self.diamond_side(s0, merge, universe, stop, claimed, &mut v2, depth + 1)
+                            && self.diamond_side(
+                                s1,
+                                merge,
+                                universe,
+                                stop,
+                                claimed,
+                                &mut v2,
+                                depth + 1,
+                            );
                     if ok {
                         visited.extend(v2);
                         return true;
@@ -6061,10 +6493,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             if !seen.insert(x) {
                 return false;
             }
-            if x != from
-                && cands.contains(&x)
-                && self.cfg.blocks[x].pred.len() > 1
-            {
+            if x != from && cands.contains(&x) && self.cfg.blocks[x].pred.len() > 1 {
                 return true;
             }
             if !self.results[x].stmts.is_empty() {
@@ -6130,20 +6559,44 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     let dbg_lmem = crate::dbg_flag!("JCDC_DBG_LMEM");
                     if barriers.contains(&s) && s != header {
                         // enclosing loop header: never absorb it
-                        if dbg_lmem { eprintln!("LMEM h={} from={} s={} why=barrier", header, b, s); }
+                        if dbg_lmem {
+                            eprintln!("LMEM h={} from={} s={} why=barrier", header, b, s);
+                        }
                         continue;
                     }
                     if s == header || !universe.contains(&s) || stop.contains(&s) {
-                        if dbg_lmem { eprintln!("LMEM h={} from={} s={} why=hdr{} univ{} stop{} hndlr={} succ={:?}", header, b, s, s == header, universe.contains(&s), stop.contains(&s), self.is_handler(s), self.cfg.blocks[s].succ); }
+                        if dbg_lmem {
+                            eprintln!(
+                                "LMEM h={} from={} s={} why=hdr{} univ{} stop{} hndlr={} succ={:?}",
+                                header,
+                                b,
+                                s,
+                                s == header,
+                                universe.contains(&s),
+                                stop.contains(&s),
+                                self.is_handler(s),
+                                self.cfg.blocks[s].succ
+                            );
+                        }
                         continue;
                     }
                     if !dom.dominates(header, s) {
-                        if dbg_lmem { eprintln!("LMEM h={} from={} s={} why=dom preds={:?}", header, b, s, self.cfg.blocks[s].pred); }
+                        if dbg_lmem {
+                            eprintln!(
+                                "LMEM h={} from={} s={} why=dom preds={:?}",
+                                header, b, s, self.cfg.blocks[s].pred
+                            );
+                        }
                         continue;
                     }
                     let reaches =
                         can_reach_cfg_barred(self.cfg, &exc_succ, s, header, &barriers, 8192);
-                    if dbg_lmem && !reaches { eprintln!("LMEM h={} from={} s={} reaches=false succ={:?}", header, b, s, self.cfg.blocks[s].succ); }
+                    if dbg_lmem && !reaches {
+                        eprintln!(
+                            "LMEM h={} from={} s={} reaches=false succ={:?}",
+                            header, b, s, self.cfg.blocks[s].succ
+                        );
+                    }
                     if !reaches {
                         // `s` cannot loop back on its own. It is the loop's
                         // exit merge when the header branches to it directly
@@ -6227,15 +6680,25 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         }
         exits.sort_by_key(|e| self.cfg.blocks[*e].start);
 
-        let mut inner_stop: HashSet<usize> = stop.iter().copied().filter(|s| members.contains(s)).collect();
+        let mut inner_stop: HashSet<usize> = stop
+            .iter()
+            .copied()
+            .filter(|s| members.contains(s))
+            .collect();
         inner_stop.extend(exits.iter().copied());
         // NOTE: header is NOT in inner_stop — the walk starts there and the
         // claimed-guard stops re-entry (back edges become Goto{header}).
         if crate::dbg_flag!("JCDC_DBG_IF") {
-            eprintln!("structure_loop header={} members={:?} exits={:?}", header, members, exits);
+            eprintln!(
+                "structure_loop header={} members={:?} exits={:?}",
+                header, members, exits
+            );
         }
         if crate::dbg_flag!("JCDC_DBG_LOOP") {
-            eprintln!("LOOP header={} members={:?} inner_stop={:?}", header, members, inner_stop);
+            eprintln!(
+                "LOOP header={} members={:?} inner_stop={:?}",
+                header, members, inner_stop
+            );
         }
         claimed.insert(header);
         self.loops_stack.push(header);
@@ -6258,8 +6721,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 .copied()
                 .filter(|x| !members.contains(x) && *x != header)
                 .collect();
-            let reach_all: HashSet<usize> =
-                (0..self.cfg.blocks.len()).collect();
+            let reach_all: HashSet<usize> = (0..self.cfg.blocks.len()).collect();
             let lh: HashSet<usize> = HashSet::new();
             self.materialize_content_exits(
                 &mut body,
@@ -6279,7 +6741,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         }
         self.loops_stack.pop();
         claimed.extend(members.iter().copied());
-        Region::Loop { header, body: Box::new(body), members, exits }
+        Region::Loop {
+            header,
+            body: Box::new(body),
+            members,
+            exits,
+        }
     }
 
     pub(crate) fn structure_switch(
@@ -6294,8 +6761,15 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         claimed: &mut HashSet<usize>,
     ) -> Region {
         if crate::dbg_flag!("JCDC_DBG_GOTO") {
-            eprintln!("SWITCHENTRY block={} start={} follow={:?} universe={} stop={:?} claimed={:?}",
-                block, self.cfg.blocks[block].start, follow, universe.len(), stop, claimed);
+            eprintln!(
+                "SWITCHENTRY block={} start={} follow={:?} universe={} stop={:?} claimed={:?}",
+                block,
+                self.cfg.blocks[block].start,
+                follow,
+                universe.len(),
+                stop,
+                claimed
+            );
         }
         let (pairs, default_pc): (Vec<(i64, u32)>, u32) =
             match (targets, self.results.get(block).map(|r| &r.term)) {
@@ -6307,13 +6781,23 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         ..
                     }),
                 ) => (
-                    ts.iter().enumerate().map(|(i, &t)| (*low as i64 + i as i64, t)).collect(),
+                    ts.iter()
+                        .enumerate()
+                        .map(|(i, &t)| (*low as i64 + i as i64, t))
+                        .collect(),
                     default.unwrap_or(0),
                 ),
                 (
                     SwitchTargets::Lookup { .. },
-                    Some(Term::Switch { targets: SwitchTargets::Lookup { pairs: ps }, default, .. }),
-                ) => (ps.iter().map(|(m, t)| (*m as i64, *t)).collect(), default.unwrap_or(0)),
+                    Some(Term::Switch {
+                        targets: SwitchTargets::Lookup { pairs: ps },
+                        default,
+                        ..
+                    }),
+                ) => (
+                    ps.iter().map(|(m, t)| (*m as i64, *t)).collect(),
+                    default.unwrap_or(0),
+                ),
                 _ => (Vec::new(), 0),
             };
         // If the default target is the switch follow (confluence), there is
@@ -6322,7 +6806,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
 
         let mut case_groups: Vec<(Vec<i64>, usize, bool)> = Vec::new(); // (vals, block, is_follow)
         for (v, t) in &pairs {
-            let Some(tb) = self.cfg.block_at(*t) else { continue };
+            let Some(tb) = self.cfg.block_at(*t) else {
+                continue;
+            };
             if Some(tb) == default_block {
                 continue;
             }
@@ -6357,11 +6843,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // Arms that bind already (trailing Goto{follow}, terminators,
         // both-branch if binds) and abrupt arms are untouched; when no
         // follow is known the historical shape is kept.
-        fn bind_arm(
-            st: &Structurer,
-            r: Region,
-            follow: Option<usize>,
-        ) -> Region {
+        fn bind_arm(st: &Structurer, r: Region, follow: Option<usize>) -> Region {
             let Some(f) = follow else { return r };
             if st.arm_binds_to(&r, f) || region_terminates(&r, st.results) {
                 return r;
@@ -6404,10 +6886,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         Region::Loop { .. } => true,
                         Region::Goto { .. } => true,
                         Region::Basic { block } => {
-                            matches!(
-                                results[*block].term,
-                                Term::Return(_) | Term::Throw(_)
-                            )
+                            matches!(results[*block].term, Term::Return(_) | Term::Throw(_))
                         }
                         Region::CopyStmts { .. } => false,
                         Region::Empty => false,
@@ -6422,7 +6901,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 // elided/inlined at conversion, so the arm falls through
                 // in the rendered layout despite looking abrupt here).
                 match r {
-                    Region::Seq(v) => matches!(v.last(), Some(Region::Switch { .. }) if all_abrupt(v.last().unwrap(), results)),
+                    Region::Seq(v) => {
+                        matches!(v.last(), Some(Region::Switch { .. }) if all_abrupt(v.last().unwrap(), results))
+                    }
                     Region::Switch { .. } => all_abrupt(r, results),
                     _ => false,
                 }
@@ -6481,9 +6962,16 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                     None
                 };
                 if crate::dbg_flag!("JCDC_DBG_GOTO") {
-                    eprintln!("SWCASE b={} univ={} claimed={} stop={} follow={:?} loops={:?} copied={}", b,
-                        universe.contains(&b), claimed.contains(&b), case_stop.contains(&b), follow,
-                        self.loops_stack, copied.is_some());
+                    eprintln!(
+                        "SWCASE b={} univ={} claimed={} stop={} follow={:?} loops={:?} copied={}",
+                        b,
+                        universe.contains(&b),
+                        claimed.contains(&b),
+                        case_stop.contains(&b),
+                        follow,
+                        self.loops_stack,
+                        copied.is_some()
+                    );
                 }
                 cases.push((vals, copied.unwrap_or(Region::Goto { target: b })));
                 continue;
@@ -6517,7 +7005,13 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             self.case_arm_ctx.pop();
             Box::new(bind_arm(self, strip_fallthrough_goto(r, &head_set), follow))
         });
-        Region::Switch { block, selector, cases, default, follow }
+        Region::Switch {
+            block,
+            selector,
+            cases,
+            default,
+            follow,
+        }
     }
 
     pub(crate) fn structure_try(
@@ -6538,11 +7032,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         let body_universe: HashSet<usize> = universe
             .iter()
             .copied()
-            .filter(|b| {
-                match self.body_group.get(b) {
-                    Some(ogi) => *ogi == gi || nested.contains(ogi),
-                    None => false,
-                }
+            .filter(|b| match self.body_group.get(b) {
+                Some(ogi) => *ogi == gi || nested.contains(ogi),
+                None => false,
             })
             .collect();
         if crate::dbg_flag!("JCDC_DBG_IF") {
@@ -6650,10 +7142,13 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                         // span would newly protect it (a checked catch
                         // would become illegal).
                         if !r.stmts.is_empty()
-                            && !r
-                                .stmts
-                                .iter()
-                                .all(|s| matches!(s, crate::ir::stmt::Stmt::MonitorExit(_) | crate::ir::stmt::Stmt::MonitorEnter(_)))
+                            && !r.stmts.iter().all(|s| {
+                                matches!(
+                                    s,
+                                    crate::ir::stmt::Stmt::MonitorExit(_)
+                                        | crate::ir::stmt::Stmt::MonitorEnter(_)
+                                )
+                            })
                         {
                             break;
                         }
@@ -6688,14 +7183,20 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 // the `len = is.read(..)` do-while body lost —
                 // 在相应的try语句主体中不能抛出异常错误SocketTimeoutException).
                 let allow = claimed.contains(&entry);
-                let mut r = self.walk(entry, &body_universe, &HashSet::new(), &nested, claimed, allow);
+                let mut r = self.walk(
+                    entry,
+                    &body_universe,
+                    &HashSet::new(),
+                    &nested,
+                    claimed,
+                    allow,
+                );
                 // Flow leaving the try body to the post-try continuation is
                 // natural fallthrough (the outer walk picks it up there).
                 let cont = self
                     .continuation_after(g.end, outer_universe, claimed, stop)
                     .filter(|c| {
-                        !self.handler_flow_only(gi).contains(c)
-                            && !body_universe.contains(c)
+                        !self.handler_flow_only(gi).contains(c) && !body_universe.contains(c)
                     });
                 outer_cont_some = cont.is_some();
                 if crate::dbg_flag!("JCDC_DBG_IF") {
@@ -6715,7 +7216,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // become one catch with multiple types.
         let mut merged_handlers: Vec<(Vec<String>, u32, usize)> = Vec::new(); // types, hpc, hb
         for (hpc, ty) in &g.handlers {
-            let Some(hb) = self.cfg.block_at(*hpc) else { continue };
+            let Some(hb) = self.cfg.block_at(*hpc) else {
+                continue;
+            };
             if self.handler_group.get(&hb) != Some(&gi) {
                 continue;
             }
@@ -6746,11 +7249,21 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             }
             let mut huniverse = reachable_within(self.cfg, *hb, &hstop);
             if crate::dbg_flag!("JCDC_DBG_HUNIV") {
-                eprintln!("HUNIV0 gi={} hb={} hstop={:?} reach={:?}", gi, hb, {
-                    let mut v: Vec<usize> = hstop.iter().copied().collect(); v.sort(); v
-                }, {
-                    let mut v: Vec<usize> = huniverse.iter().copied().collect(); v.sort(); v
-                });
+                eprintln!(
+                    "HUNIV0 gi={} hb={} hstop={:?} reach={:?}",
+                    gi,
+                    hb,
+                    {
+                        let mut v: Vec<usize> = hstop.iter().copied().collect();
+                        v.sort();
+                        v
+                    },
+                    {
+                        let mut v: Vec<usize> = huniverse.iter().copied().collect();
+                        v.sort();
+                        v
+                    }
+                );
             }
             // Keep the handler walk out of try-body blocks that start before
             // this group's end (real protected code), and out of other
@@ -6836,8 +7349,14 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             if crate::dbg_flag!("JCDC_DBG_HUNIV") {
                 eprintln!(
                     "HUNIV1 gi={} hb={} shared_merge={:?} huniverse={:?}",
-                    gi, hb, shared_merge,
-                    { let mut v: Vec<usize> = huniverse.iter().copied().collect(); v.sort(); v }
+                    gi,
+                    hb,
+                    shared_merge,
+                    {
+                        let mut v: Vec<usize> = huniverse.iter().copied().collect();
+                        v.sort();
+                        v
+                    }
                 );
             }
             if !shared_merge.is_empty() {
@@ -6845,7 +7364,9 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 huniverse.retain(|b| !tail.contains(b) || *b == *hb || hf.contains(b));
                 if crate::dbg_flag!("JCDC_DBG_HUNIV") {
                     eprintln!("HUNIV2 gi={} after-strip={:?}", gi, {
-                        let mut v: Vec<usize> = huniverse.iter().copied().collect(); v.sort(); v
+                        let mut v: Vec<usize> = huniverse.iter().copied().collect();
+                        v.sort();
+                        v
                     });
                 }
             }
@@ -6966,8 +7487,7 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                     }
                                 }
                                 while let Some(x) = q.pop_front() {
-                                    let mut edges: Vec<usize> =
-                                        self.cfg.blocks[x].succ.clone();
+                                    let mut edges: Vec<usize> = self.cfg.blocks[x].succ.clone();
                                     if let Some(&c) = conts.get(&x) {
                                         edges.push(c);
                                     }
@@ -7011,7 +7531,12 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                                 }
                                 _ => {}
                             }
-                            if self.handler_group.get(&x).map(|og| *og != gi).unwrap_or(false) {
+                            if self
+                                .handler_group
+                                .get(&x)
+                                .map(|og| *og != gi)
+                                .unwrap_or(false)
+                            {
                                 continue;
                             }
                             if self.cfg.blocks[x].pred.iter().all(|p| {
@@ -7095,7 +7620,11 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
             catches.push((tys.clone(), *hb, Box::new(r)));
         }
         self.structuring_groups.borrow_mut().retain(|&x| x != gi);
-        Region::Try { group_idx: gi, body: Box::new(body), catches }
+        Region::Try {
+            group_idx: gi,
+            body: Box::new(body),
+            catches,
+        }
     }
 }
 

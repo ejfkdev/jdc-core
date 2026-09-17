@@ -32,7 +32,11 @@ fn blk(id: usize, start: u32, len: u32, succ: Vec<usize>) -> jdc_core::cfg::Bloc
 }
 
 fn res(stmts: Vec<Stmt>, term: Term) -> BlockResult {
-    BlockResult { stmts, out_stack: Vec::new(), term }
+    BlockResult {
+        stmts,
+        out_stack: Vec::new(),
+        term,
+    }
 }
 
 /// Add a local to a fresh table (the front-end's job: DEX has no LVT).
@@ -47,7 +51,10 @@ fn vt_with(params: &[(&str, JavaType)]) -> VarTable {
 
 fn local(vt: &VarTable, name: &str) -> Expr {
     let v = vt.vars.iter().find(|v| v.name == name).expect("var");
-    Expr::Local { var: v.id, ty: v.ty.clone() }
+    Expr::Local {
+        var: v.id,
+        ty: v.ty.clone(),
+    }
 }
 
 fn int(i: i32) -> Expr {
@@ -127,7 +134,13 @@ fn p_stmt(s: &Stmt, vt: &VarTable, out: &mut String, ind: usize) {
         Stmt::LocalDef { var, init, .. } => {
             let t = vt.var(*var).ty.erased().to_java(true);
             match init {
-                Some(e) => out.push_str(&format!("{}{} {} = {};\n", pad, t, vt.var(*var).name, p_expr(e, vt))),
+                Some(e) => out.push_str(&format!(
+                    "{}{} {} = {};\n",
+                    pad,
+                    t,
+                    vt.var(*var).name,
+                    p_expr(e, vt)
+                )),
                 None => out.push_str(&format!("{}{} {};\n", pad, t, vt.var(*var).name)),
             }
         }
@@ -136,7 +149,11 @@ fn p_stmt(s: &Stmt, vt: &VarTable, out: &mut String, ind: usize) {
             None => out.push_str(&format!("{}return;\n", pad)),
         },
         Stmt::Throw(e) => out.push_str(&format!("{}throw {};\n", pad, p_expr(e, vt))),
-        Stmt::If { cond, then_stmt, else_stmt } => {
+        Stmt::If {
+            cond,
+            then_stmt,
+            else_stmt,
+        } => {
             out.push_str(&format!("{}if ({}) {{\n", pad, p_expr(cond, vt)));
             p_stmt(then_stmt, vt, out, ind + 1);
             out.push_str(&format!("{}}}", pad));
@@ -157,7 +174,12 @@ fn p_stmt(s: &Stmt, vt: &VarTable, out: &mut String, ind: usize) {
             p_stmt(body, vt, out, ind + 1);
             out.push_str(&format!("{}}} while ({});\n", pad, p_expr(cond, vt)));
         }
-        Stmt::For { init, cond, update, body } => {
+        Stmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
             let mut init_s = String::new();
             for x in init {
                 if let Stmt::ExprStmt(e) = x {
@@ -168,12 +190,20 @@ fn p_stmt(s: &Stmt, vt: &VarTable, out: &mut String, ind: usize) {
             let upd_s: Vec<String> = update.iter().map(|u| p_expr(u, vt)).collect();
             out.push_str(&format!(
                 "{}for ({}; {}; {}) {{\n",
-                pad, init_s, cond_s, upd_s.join(", ")
+                pad,
+                init_s,
+                cond_s,
+                upd_s.join(", ")
             ));
             p_stmt(body, vt, out, ind + 1);
             out.push_str(&format!("{}}}\n", pad));
         }
-        Stmt::Switch { selector, cases, default, .. } => {
+        Stmt::Switch {
+            selector,
+            cases,
+            default,
+            ..
+        } => {
             out.push_str(&format!("{}switch ({}) {{\n", pad, p_expr(selector, vt)));
             for c in cases {
                 let labels: Vec<String> = c.labels.iter().map(|l| l.to_string()).collect();
@@ -190,12 +220,24 @@ fn p_stmt(s: &Stmt, vt: &VarTable, out: &mut String, ind: usize) {
             }
             out.push_str(&format!("{}}}\n", pad));
         }
-        Stmt::Try { body, catches, finally } => {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        } => {
             out.push_str(&format!("{}try {{\n", pad));
             p_stmt(body, vt, out, ind + 1);
             for c in catches {
-                let name = c.var_name.clone().unwrap_or_else(|| vt.var(c.var).name.clone());
-                out.push_str(&format!("{}}} catch ({} {}) {{\n", pad, c.exc.join(" | "), name));
+                let name = c
+                    .var_name
+                    .clone()
+                    .unwrap_or_else(|| vt.var(c.var).name.clone());
+                out.push_str(&format!(
+                    "{}}} catch ({} {}) {{\n",
+                    pad,
+                    c.exc.join(" | "),
+                    name
+                ));
                 p_stmt(&c.body, vt, out, ind + 1);
             }
             out.push_str(&format!("{}}}\n", pad));
@@ -208,7 +250,11 @@ fn p_stmt(s: &Stmt, vt: &VarTable, out: &mut String, ind: usize) {
         Stmt::Break(None) => out.push_str(&format!("{}break;\n", pad)),
         Stmt::Continue(None) => out.push_str(&format!("{}continue;\n", pad)),
         Stmt::Comment(c) => out.push_str(&format!("{}// {}\n", pad, c)),
-        other => out.push_str(&format!("{}<stmt:{:?}>\n", pad, std::mem::discriminant(other))),
+        other => out.push_str(&format!(
+            "{}<stmt:{:?}>\n",
+            pad,
+            std::mem::discriminant(other)
+        )),
     }
 }
 
@@ -226,7 +272,11 @@ fn print(s: &Stmt, vt: &VarTable) -> String {
 /// `assign_catch_names` pair, which a shared `passes` module will own.
 fn bind_catches(s: &mut Stmt, vt: &mut VarTable) {
     match s {
-        Stmt::Try { body, catches, finally } => {
+        Stmt::Try {
+            body,
+            catches,
+            finally,
+        } => {
             bind_catches(body, vt);
             for c in catches.iter_mut() {
                 if c.var == u32::MAX {
@@ -265,7 +315,11 @@ fn bind_catches(s: &mut Stmt, vt: &mut VarTable) {
             }
         }
         Stmt::Block(v) => v.iter_mut().for_each(|x| bind_catches(x, vt)),
-        Stmt::If { then_stmt, else_stmt, .. } => {
+        Stmt::If {
+            then_stmt,
+            else_stmt,
+            ..
+        } => {
             bind_catches(then_stmt.as_mut(), vt);
             if let Some(e) = else_stmt {
                 bind_catches(e.as_mut(), vt);
@@ -336,7 +390,11 @@ fn rewrite_locals(s: &mut Stmt, from: u32, to: u32) {
         Stmt::ExprStmt(x) | Stmt::Throw(x) => e(x, from, to),
         Stmt::Return(Some(x)) => e(x, from, to),
         Stmt::LocalDef { init: Some(x), .. } => e(x, from, to),
-        Stmt::If { cond, then_stmt, else_stmt } => {
+        Stmt::If {
+            cond,
+            then_stmt,
+            else_stmt,
+        } => {
             e(cond, from, to);
             rewrite_locals(then_stmt.as_mut(), from, to);
             if let Some(el) = else_stmt {
@@ -393,16 +451,38 @@ fn register_machine_loop_with_if_else() {
         ty: Some(TypeRef::J(JavaType::Int)),
     };
     let results = vec![
-        res(vec![assign(local(&vt, "i"), int(0))], Term::Goto),                   // 0
-        res(vec![], Term::Cond { cond: cond_loop.clone() }),                      // 1
-        res(vec![], Term::Cond { cond: cond_if.clone() }),                        // 2
-        res(vec![assign(local(&vt, "r"), add(local(&vt, "r"), int(100)))], Term::Goto), // 3
-        res(vec![assign(local(&vt, "r"), add(local(&vt, "r"), local(&vt, "i")))], Term::Goto), // 4
-        res(vec![assign(local(&vt, "i"), add(local(&vt, "i"), int(1)))], Term::Goto),   // 5
+        res(vec![assign(local(&vt, "i"), int(0))], Term::Goto), // 0
+        res(
+            vec![],
+            Term::Cond {
+                cond: cond_loop.clone(),
+            },
+        ), // 1
+        res(
+            vec![],
+            Term::Cond {
+                cond: cond_if.clone(),
+            },
+        ), // 2
+        res(
+            vec![assign(local(&vt, "r"), add(local(&vt, "r"), int(100)))],
+            Term::Goto,
+        ), // 3
+        res(
+            vec![assign(
+                local(&vt, "r"),
+                add(local(&vt, "r"), local(&vt, "i")),
+            )],
+            Term::Goto,
+        ), // 4
+        res(
+            vec![assign(local(&vt, "i"), add(local(&vt, "i"), int(1)))],
+            Term::Goto,
+        ), // 5
         // The return's VALUE lives in the term; `stmts` stays empty and the
         // converter materializes `return r;` (declaring both duplicates it —
         // the real emitter then prints a stray `return;`).
-        res(vec![], Term::Return(Some(local(&vt, "r")))),                         // 6
+        res(vec![], Term::Return(Some(local(&vt, "r")))), // 6
     ];
 
     let body = structuralize(&cfg, &results);
@@ -419,10 +499,14 @@ fn register_machine_loop_with_if_else() {
     assert!(text.contains("return r;"), "no return in:\n{}", text);
     // Both arms of the inner conditional are present (as an if/else or as a
     // folded conditional — the structurer decides).
-    let both_arms = (text.contains("r = r + 100;") && text.contains("r = r + i;"))
-        || text.contains("if (");
+    let both_arms =
+        (text.contains("r = r + 100;") && text.contains("r = r + i;")) || text.contains("if (");
     assert!(both_arms, "conditional arms missing in:\n{}", text);
-    assert!(text.contains("i = i + 1;"), "increment missing in:\n{}", text);
+    assert!(
+        text.contains("i = i + 1;"),
+        "increment missing in:\n{}",
+        text
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -436,30 +520,33 @@ fn register_machine_switch_with_default() {
     let vt = vt_with(&[("n", JavaType::Int), ("r", JavaType::Int)]);
     let cfg = Cfg::from_blocks(
         vec![
-            blk(0, 0, 2, vec![1]),        // prologue
-            blk(1, 2, 2, vec![2, 3, 4]),  // switch: case0 -> 2, case1 -> 3, default -> 4
-            blk(2, 4, 2, vec![5]),        // case 0
-            blk(3, 6, 2, vec![5]),        // case 1
-            blk(4, 8, 2, vec![5]),        // default
-            blk(5, 10, 2, vec![]),        // exit
+            blk(0, 0, 2, vec![1]),       // prologue
+            blk(1, 2, 2, vec![2, 3, 4]), // switch: case0 -> 2, case1 -> 3, default -> 4
+            blk(2, 4, 2, vec![5]),       // case 0
+            blk(3, 6, 2, vec![5]),       // case 1
+            blk(4, 8, 2, vec![5]),       // default
+            blk(5, 10, 2, vec![]),       // exit
         ],
         0,
         vec![],
     );
     let results = vec![
-        res(vec![], Term::Fallthrough),                                            // 0
+        res(vec![], Term::Fallthrough), // 0
         res(
             vec![],
             Term::Switch {
                 selector: local(&vt, "n"),
-                targets: SwitchTargets::Table { low: 0, targets: vec![4, 6] },
+                targets: SwitchTargets::Table {
+                    low: 0,
+                    targets: vec![4, 6],
+                },
                 default: Some(8),
             },
-        ),                                                                         // 1
-        res(vec![assign(local(&vt, "r"), int(10))], Term::Goto),                   // 2
-        res(vec![assign(local(&vt, "r"), int(20))], Term::Goto),                   // 3
-        res(vec![assign(local(&vt, "r"), int(30))], Term::Goto),                   // 4
-        res(vec![], Term::Return(Some(local(&vt, "r")))),                          // 5
+        ), // 1
+        res(vec![assign(local(&vt, "r"), int(10))], Term::Goto), // 2
+        res(vec![assign(local(&vt, "r"), int(20))], Term::Goto), // 3
+        res(vec![assign(local(&vt, "r"), int(30))], Term::Goto), // 4
+        res(vec![], Term::Return(Some(local(&vt, "r")))), // 5
     ];
 
     let body = structuralize(&cfg, &results);
@@ -467,7 +554,11 @@ fn register_machine_switch_with_default() {
     println!("--- scenario 2 ---\n{}", text);
 
     assert!(text.contains("switch ("), "no switch in:\n{}", text);
-    assert!(text.contains("10") && text.contains("20") && text.contains("30"), "arms missing:\n{}", text);
+    assert!(
+        text.contains("10") && text.contains("20") && text.contains("30"),
+        "arms missing:\n{}",
+        text
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -481,9 +572,9 @@ fn register_machine_try_catch() {
     let mut vt = vt_with(&[("n", JavaType::Int)]);
     let cfg = Cfg::from_blocks(
         vec![
-            blk(0, 0, 4, vec![1]),    // protected body -> falls through
-            blk(1, 4, 2, vec![]),     // normal exit
-            blk(2, 6, 2, vec![]),     // handler
+            blk(0, 0, 4, vec![1]), // protected body -> falls through
+            blk(1, 4, 2, vec![]),  // normal exit
+            blk(2, 6, 2, vec![]),  // handler
         ],
         0,
         vec![ExcRange {
@@ -522,7 +613,12 @@ fn register_machine_try_catch() {
         // that is what the front-end's catch-binding step looks for
         // (reference: jcdc's `resolve_catch_vars`).
         res(
-            vec![Stmt::LocalDef { var: handler_var, init: None, is_final: false, force_type: true }],
+            vec![Stmt::LocalDef {
+                var: handler_var,
+                init: None,
+                is_final: false,
+                force_type: true,
+            }],
             Term::Throw(local(&vt, "e")),
         ),
     ];
@@ -567,13 +663,24 @@ fn real_emitter_prints_register_machine_ir() {
         vec![],
     );
     let results = vec![
-        res(vec![], Term::Cond { cond: less_than(local(&vt, "n"), int(10)) }),
-        res(vec![assign(local(&vt, "r"), add(local(&vt, "n"), int(1)))], Term::Goto),
+        res(
+            vec![],
+            Term::Cond {
+                cond: less_than(local(&vt, "n"), int(10)),
+            },
+        ),
+        res(
+            vec![assign(local(&vt, "r"), add(local(&vt, "n"), int(1)))],
+            Term::Goto,
+        ),
         res(vec![], Term::Return(Some(local(&vt, "r")))),
     ];
 
     let body = structuralize(&cfg, &results);
-    let ctx = NullCtx { class_name: "demo/Register".into(), level: 52 };
+    let ctx = NullCtx {
+        class_name: "demo/Register".into(),
+        level: 52,
+    };
     let text = Printer::new(&ctx, &vt).into_string(&body);
     println!("--- real emitter ---\n{}", text);
 
