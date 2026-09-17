@@ -24,32 +24,8 @@ use crate::ir::expr::Expr;
 // Dominators & flow queries
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-/// Method-invariant inputs of `immediate_postdom` (see postdom_ipdom).
-struct PostdomCtx {
-    exempt: HashSet<usize>,
-    terminators: HashSet<usize>,
-    final_writers: HashSet<usize>,
-    abrupt_only: HashSet<usize>,
-    stmt_counts: Vec<usize>,
-}
-
-#[derive(Clone, Debug)]
 pub struct DomInfo {
     pub idom: Vec<usize>,
-}
-
-/// Perf instrumentation: how many times the walk recomputed dominators
-/// (and over how many blocks). Dominance over the FULL block vector is
-/// O(n) per call even when the scope's universe is tiny. Off by default —
-/// the unconditional atomics contended on 7M calls/run.
-pub static DOM_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static DOM_BLOCKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static DOM_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Enable dominator-recompute counters (diagnostics).
-pub fn set_dom_counters(on: bool) {
-    DOM_ON.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl DomInfo {
@@ -100,59 +76,13 @@ pub fn reverse_postorder(cfg: &Cfg, entry: usize, universe: &HashSet<usize>) -> 
     out
 }
 
-fn blocks_in_span(cfg: &Cfg, lo: u32, hi: u32) -> impl Iterator<Item = &crate::cfg::Block> {
-    let i = cfg.starts_partition(lo);
-    let j = cfg.starts_partition(hi);
-    cfg.blocks[i..j].iter().filter(move |b| b.start >= lo && b.end <= hi)
-}
-
 pub fn compute_dominators(cfg: &Cfg, universe: &HashSet<usize>, entry: usize) -> DomInfo {
-    if DOM_ON.load(std::sync::atomic::Ordering::Relaxed) {
-        DOM_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        DOM_BLOCKS.fetch_add(cfg.blocks.len() as u64, std::sync::atomic::Ordering::Relaxed);
-    }
-    // Perf: membership via hash `contains` per edge dominated the walk on
-    // many-block methods — a one-shot dense bitset makes the CHK passes
-    // pure array probes. (O(n) build, O(1) per probe.)
     let n = cfg.blocks.len();
-    let mut member = vec![false; n];
-    for &b in universe {
-        if b < n {
-            member[b] = true;
-        }
-    }
     let mut idom = vec![usize::MAX; n];
-    if entry < n && member[entry] {
+    if universe.contains(&entry) {
         idom[entry] = entry;
     }
-    // RPO over the member bitset.
-    let mut visited = vec![false; n];
-    let mut rpo: Vec<usize> = Vec::new();
-    if !(entry < n && member[entry]) {
-        for i in 0..n {
-            if idom[i] == usize::MAX {
-                idom[i] = i;
-            }
-        }
-        return DomInfo { idom };
-    }
-    let mut stack: Vec<(usize, usize)> = vec![(entry, 0)];
-    visited[entry] = true;
-    while let Some((b, idx)) = stack.last_mut() {
-        let b = *b;
-        if *idx < cfg.blocks[b].succ.len() {
-            let s = cfg.blocks[b].succ[*idx];
-            *idx += 1;
-            if s < n && !visited[s] && member[s] {
-                visited[s] = true;
-                stack.push((s, 0));
-            }
-        } else {
-            rpo.push(b);
-            stack.pop();
-        }
-    }
-    rpo.reverse();
+    let rpo = reverse_postorder(cfg, entry, universe);
     let mut rpo_num = vec![usize::MAX; n];
     for (i, &b) in rpo.iter().enumerate() {
         rpo_num[b] = i;
@@ -250,53 +180,6 @@ thread_local! {
 /// Install/clear the per-method copy-budget override (see BUDGET_OVERRIDE).
 pub fn set_budget_override(v: Option<u32>) {
     BUDGET_OVERRIDE.with(|c| c.set(v));
-}
-
-thread_local! {
-    /// Per-method walk-visit override: caps the TOTAL number of
-    /// `walk_inner` invocations (the copy budget bounds copying, not the
-    /// exponential exploration itself — R8-merged switch cascades can
-    /// spend seconds in visits while copying nothing). `None` (default)
-    /// keeps the historic behavior; DEX front-ends install a cap.
-    pub static WALK_VISIT_OVERRIDE: std::cell::Cell<Option<u64>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Install/clear the per-method walk-visit budget (see WALK_VISIT_OVERRIDE).
-pub fn set_walk_visit_budget(v: Option<u64>) {
-    WALK_VISIT_OVERRIDE.with(|c| c.set(v));
-}
-
-thread_local! {
-    /// Per-method walk wall-clock deadline (None = off). The visit budget
-    /// is deterministic but only bounds CALL COUNT — one pathological
-    /// method (Telegram SendMessagesHelper.sendMessage, 1734 blocks)
-    /// spends ~6ms per visit in scope/set construction, so even a tight
-    /// visit budget ran minutes. The deadline cuts the walk at a fixed
-    /// time; degradation is a Goto, same as the visit budget.
-    static WALK_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Install/clear the per-method walk deadline.
-pub fn set_walk_deadline(d: Option<std::time::Instant>) {
-    WALK_DEADLINE.with(|c| c.set(d));
-}
-
-/// Walk() calls consumed by the last method (feature "visit-stats").
-#[cfg(feature = "visit-stats")]
-thread_local! {
-    pub static WALK_VISITS_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(feature = "visit-stats")]
-pub fn walk_visits_consumed() -> u64 {
-    WALK_VISITS_TOTAL.with(|c| c.get())
-}
-
-#[cfg(feature = "visit-stats")]
-pub fn reset_visit_stats() {
-    WALK_VISITS_TOTAL.with(|c| c.set(0));
 }
 
 /// Blocks normally reachable from `entry` without entering `stop`.
@@ -1021,27 +904,12 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
         v.dedup();
         v
     }
-    // Perf: handler_key allocates+sorts per comparison inside the O(G²)
-    // scan (times restart rounds) — precompute once, maintain on merge.
-    // The pairs re-compare on EVERY restart round; on monster classes
-    // (gson adapters: hundreds of same-handler try ranges) the deep
-    // Vec<Vec<(u32, Option<String>)>> equality dominated the whole
-    // decompile. Intern each distinct key to a u32 id and compare ids.
-    let mut intern: HashMap<Vec<(u32, Option<String>)>, u32> = HashMap::new();
-    let key_id = |k: &Vec<(u32, Option<String>)>, intern: &mut HashMap<_, u32>| {
-        let next = intern.len() as u32;
-        *intern.entry(k.clone()).or_insert(next)
-    };
-    let mut key_ids: Vec<u32> = groups
-        .iter()
-        .map(|g| key_id(&handler_key(g), &mut intern))
-        .collect();
     loop {
         let mut merged_any = false;
         'outer: for i in 0..groups.len() {
             for j in (i + 1)..groups.len() {
                 let (a, b) = if groups[i].start <= groups[j].start { (i, j) } else { (j, i) };
-                if key_ids[a] != key_ids[b] {
+                if handler_key(&groups[a]) != handler_key(&groups[b]) {
                     continue;
                 }
                 if groups[b].start > groups[a].end.saturating_add(4) {
@@ -1113,10 +981,6 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
                 groups[a].end = new_end;
                 groups[a].ranges = ranges;
                 groups.remove(b);
-                // The merged group keeps groups[a]'s handlers verbatim
-                // (only span and ranges grow), so its interned key id is
-                // unchanged — no re-key on merge.
-                key_ids.remove(b);
                 merged_any = true;
                 break 'outer;
             }
@@ -1144,25 +1008,22 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
                 if i == j {
                     continue;
                 }
-                // Perf: the pair scan clones BOTH groups before any
-                // check — on group-heavy monsters that is millions of
-                // TryGroup clones per scan. Gate on the cheap field
-                // checks FIRST, clone only a confirmed match.
-                let (xref, yref) = (&groups[i], &groups[j]);
+                let x = groups[i].clone();
+                let y = groups[j].clone();
                 // Y must start AT one of X's handler pcs (Y protects X's
                 // handler code) and extend strictly past X.
-                if !xref.handlers.iter().any(|(h, _)| *h == yref.start) {
+                if !x.handlers.iter().any(|(h, _)| *h == y.start) {
                     continue;
                 }
-                if yref.start < xref.end || yref.start > xref.end.saturating_add(8) {
+                if y.start < x.end || y.start > x.end.saturating_add(8) {
                     continue;
                 }
-                if yref.end <= xref.end {
+                if y.end <= x.end {
                     continue;
                 }
                 // Y's handler set is a strict subset of X's (the shared
                 // outer catches); X keeps at least one inner-only handler.
-                if !yref.handlers.iter().all(|h| xref.handlers.contains(h)) {
+                if !y.handlers.iter().all(|h| x.handlers.contains(h)) {
                     continue;
                 }
                 // Y's handlers must ALL be typed catches: a catch-all
@@ -1174,11 +1035,9 @@ pub fn group_exceptions_with(cfg: &Cfg, results: Option<&Vec<crate::ir::build::B
                 // `++i` increment vanished inside the merged topology —
                 // infinite loop, run timeout ×6 releases). KDF's outer
                 // IAPE/NSAE catches are typed; finally copies never are.
-                if !yref.handlers.iter().all(|(_, t)| t.is_some()) {
+                if !y.handlers.iter().all(|(_, t)| t.is_some()) {
                     continue;
                 }
-                let x = xref.clone();
-                let y = yref.clone();
                 let inner_handlers: Vec<(u32, Option<String>)> = x
                     .handlers
                     .iter()
@@ -1425,12 +1284,6 @@ pub struct Structurer<'a> {
     /// Current `walk` recursion depth (hang guard for pathological methods
     /// whose shared-tail / branch decomposition does not converge).
     walk_depth: usize,
-    /// Remaining walk visits when WALK_VISIT_OVERRIDE armed (u64::MAX = off).
-    walk_visits_left: std::cell::Cell<u64>,
-    /// Method-invariant rejection sets for postdom_ipdom, computed once.
-    postdom_ctx: std::cell::OnceCell<PostdomCtx>,
-    /// Walk wall-clock deadline (see set_walk_deadline).
-    walk_deadline: Option<std::time::Instant>,
     /// Per-method ticket budget for COPY-producing mechanisms
     /// (copy_walk, PARKCHAIN chain completions, per-arrival fills).
     /// Nested copies multiply: jdk8 java.awt.Toolkit.eventDispatched's
@@ -1455,11 +1308,6 @@ pub struct Structurer<'a> {
     pub body_group: HashMap<usize, usize>,
     /// Group index owning each handler head block.
     pub handler_group: HashMap<usize, usize>,
-    /// Block start pc → block id (starts are unique). The scope walkers
-    /// used to full-scan `cfg.blocks` for `nb.start == X` inside nested
-    /// loops — O(B) per probe, O(B·G·|seed|) per sub_scope call on the
-    /// R8-merged many-try methods.
-    pub(crate) block_at_start: HashMap<u32, usize>,
     /// Final fields of the emitting class: SESE must not duplicate a
     /// shared terminator block that assigns one (a final accepts exactly
     /// one assignment per path — jdk17 Long$LongCache clinit tail
@@ -2040,30 +1888,6 @@ impl<'a> Structurer<'a> {
         fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
     ) -> Structurer<'a> {
         let groups = group_exceptions_with(cfg, Some(results));
-        Self::from_parts(cfg, results, groups, diamond_merges, fold_regions)
-    }
-
-    /// Same as `with_diamonds` but with a PRECOMPUTED group set: the
-    /// O(groups²) `group_exceptions_with` scan runs once per method and is
-    /// shared with the Converter (monster classes spend seconds in it
-    /// otherwise — computed twice, and again per copy-budget retry).
-    pub fn with_precomputed_groups(
-        cfg: &'a Cfg,
-        results: &'a Vec<BlockResult>,
-        groups: Vec<TryGroup>,
-        diamond_merges: std::collections::HashSet<usize>,
-        fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
-    ) -> Structurer<'a> {
-        Self::from_parts(cfg, results, groups, diamond_merges, fold_regions)
-    }
-
-    fn from_parts(
-        cfg: &'a Cfg,
-        results: &'a Vec<BlockResult>,
-        groups: Vec<TryGroup>,
-        diamond_merges: std::collections::HashSet<usize>,
-        fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
-    ) -> Structurer<'a> {
         let mut body_group = HashMap::new();
         let mut handler_group = HashMap::new();
         // Groups are sorted outer-first (start asc, end desc); later
@@ -2089,77 +1913,56 @@ impl<'a> Structurer<'a> {
         for (&merge, (root, _vis)) in &fold_regions {
             fold_root_to_merge.insert(*root, merge);
         }
-        Structurer { cfg, results, groups, body_group, handler_group, diamond_merges, fold_regions, fold_root_to_merge, copied_tails: HashSet::new(), loops_stack: Vec::new(), switch_depth: 0, case_arm_ctx: Vec::new(), sese_loop_headers: std::collections::HashSet::new(), sese_exc_retry_headers: std::collections::HashSet::new(), block_at_start: cfg.blocks.iter().map(|b| (b.start, b.id)).collect(), walk_depth: 0, walk_visits_left: std::cell::Cell::new(WALK_VISIT_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX)), copy_budget: std::cell::Cell::new(BUDGET_OVERRIDE.with(|c| c.get()).or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32)).unwrap_or(512)), final_fields: HashSet::new(), structuring_groups: std::cell::RefCell::new(Vec::new()), postdom_ctx: std::cell::OnceCell::new(), walk_deadline: WALK_DEADLINE.with(|c| c.get()) }
+        Structurer { cfg, results, groups, body_group, handler_group, diamond_merges, fold_regions, fold_root_to_merge, copied_tails: HashSet::new(), loops_stack: Vec::new(), switch_depth: 0, case_arm_ctx: Vec::new(), sese_loop_headers: std::collections::HashSet::new(), sese_exc_retry_headers: std::collections::HashSet::new(), walk_depth: 0, copy_budget: std::cell::Cell::new(BUDGET_OVERRIDE.with(|c| c.get()).or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32)).unwrap_or(512)), final_fields: HashSet::new(), structuring_groups: std::cell::RefCell::new(Vec::new()) }
     }
 
     /// Immediate post-dominator of `entry` within `universe`. Delegates to the
     /// O(n) `immediate_postdom` (BFS nearest-confluence with successor-candidate
     /// rejection); kept as a `&mut self` method for call-site convenience.
     pub(crate) fn postdom_ipdom(&mut self, universe: &HashSet<usize>, entry: usize) -> Option<usize> {
-        // The exempt/terminators/final_writers/abrupt_only/stmt_counts
-        // sets are METHOD-INVARIANT (they depend only on the pool results
-        // and the group topology), yet the old body rebuilt all of them —
-        // several O(n) HashSet constructions — on EVERY call, and
-        // walk_inner consults postdom_ipdom at every IF decision. The
-        // exponential explorations (Telegram SendMessagesHelper.
-        // sendMessage: 1734 blocks) burned minutes inside these rebuilds
-        // before any visit budget could fire; legit methods paid them
-        // per if-statement too. Compute once, reuse forever.
-        let ctx = self
-            .postdom_ctx
-            .get_or_init(|| {
-                // Successor-candidate rejection exempts every GROUP-OWNED
-                // block (whole try bodies and handler heads, not just group
-                // starts): rejecting an in-body successor re-routes the
-                // COND walk across the carve-out boundary and dissolved
-                // HttpURLConnection.getInputStream0's inner try/catch,
-                // while the statement-block rejection outside groups stays.
-                let mut exempt: HashSet<usize> =
-                    self.handler_group.keys().copied().collect();
-                for g in &self.groups {
-                    if let Some(b) = self.cfg.block_at(g.start) {
-                        exempt.insert(b);
-                    }
-                }
-                let terminators: HashSet<usize> = (0..self.results.len())
-                    .filter(|&b| self.is_terminator_block(b))
-                    .collect();
-                let final_writers: HashSet<usize> = (0..self.results.len())
-                    .filter(|&b| self.terminator_writes_final(b))
-                    .collect();
-                // Blocks whose every CFG exit is abrupt (return/throw or
-                // none): a route landing there dies before any parked
-                // merge, so it never skips a shared RETURN tail.
-                let mut abrupt_only: HashSet<usize> = HashSet::new();
-                for b in 0..self.results.len() {
-                    let term_abrupt = matches!(
-                        self.results[b].term,
-                        crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
-                    );
-                    let succs_abrupt = !self.cfg.blocks[b].succ.is_empty()
-                        && self.cfg.blocks[b].succ.iter().all(|&x| terminators.contains(&x));
-                    if term_abrupt || succs_abrupt {
-                        abrupt_only.insert(b);
-                    }
-                }
-                let stmt_counts: Vec<usize> =
-                    self.results.iter().map(|r| r.stmts.len()).collect();
-                PostdomCtx { exempt, terminators, final_writers, abrupt_only, stmt_counts }
-            });
+        // Successor-candidate rejection exempts every GROUP-OWNED block
+        // (whole try bodies and handler heads, not just group starts):
+        // rejecting an in-body successor re-routes the COND walk across
+        // the carve-out boundary and dissolved
+        // HttpURLConnection.getInputStream0's inner try/catch (bare 'try'
+        // x3 sites x3 trees — the rejected taken target at pc 813 sits
+        // mid-range of the 283..1853 protected body), while the
+        // statement-block rejection outside groups (OCSP/Driver/
+        // AnnotationType families) stays.
+        let mut exempt: HashSet<usize> = self.handler_group.keys().copied().collect();
+        for g in &self.groups {
+            if let Some(b) = self.cfg.block_at(g.start) {
+                exempt.insert(b);
+            }
+        }
         let entry_group = self.body_group.get(&entry).copied();
-        immediate_postdom(
-            self.cfg,
-            self.results,
-            universe,
-            entry,
-            &ctx.exempt,
-            &ctx.stmt_counts,
-            &self.body_group,
-            entry_group,
-            &ctx.terminators,
-            &ctx.abrupt_only,
-            &ctx.final_writers,
-        )
+        let terminators: HashSet<usize> = (0..self.results.len())
+            .filter(|&b| self.is_terminator_block(b))
+            .collect();
+        let final_writers: HashSet<usize> = (0..self.results.len())
+            .filter(|&b| self.terminator_writes_final(b))
+            .collect();
+        // Blocks whose every CFG exit is abrupt (return/throw or none):
+        // a route landing there dies before any parked merge, so it
+        // never skips a shared RETURN tail (CHM.equals' method-final
+        // `return true` at pc 211 was rejected because the loop body's
+        // `return false` confluence cannot reach it — parking the tail
+        // is correct there; only DHKey's shared THROW needs the live
+        // skip route rejected).
+        let mut abrupt_only: HashSet<usize> = HashSet::new();
+        for b in 0..self.results.len() {
+            let term_abrupt = matches!(
+                self.results[b].term,
+                crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
+            );
+            let succs_abrupt = !self.cfg.blocks[b].succ.is_empty()
+                && self.cfg.blocks[b].succ.iter().all(|&x| terminators.contains(&x));
+            if term_abrupt || succs_abrupt {
+                abrupt_only.insert(b);
+            }
+        }
+        let stmt_counts: Vec<usize> = self.results.iter().map(|r| r.stmts.len()).collect();
+        immediate_postdom(self.cfg, self.results, universe, entry, &exempt, &stmt_counts, &self.body_group, entry_group, &terminators, &abrupt_only, &final_writers)
     }
 
 
@@ -2265,43 +2068,56 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
     ) -> HashSet<usize> {
         let mut sub = reachable_within(self.cfg, from, stop);
         // Restrict to the current region's universe so branch walks cannot
-        // escape their scope. Blocks inside a try group whose start is in
-        // the universe are kept even if their predecessors are outside.
-        //
-        // Perf: the original cloned the universe TWICE per call and
-        // full-scanned cfg.blocks for holds_start and the span expansion
-        // (O(B·G) per call on many-try R8 methods). The seed iterates
-        // universe + root without cloning; holds_start is an O(1) index
-        // probe; the span expansion binary-slices the sorted starts.
-        let seed: Vec<usize> = {
-            let mut v: Vec<usize> = Vec::with_capacity(universe.len() + 1);
-            v.extend(universe.iter().copied());
-            v.push(from);
-            v
-        };
-        let contains_eff = |b: usize| universe.contains(&b) || b == from;
+        // escape their scope (e.g. out of a try body into the loop header).
+        // Blocks inside a try group whose start is in the universe are kept
+        // even if their predecessors are outside: their flow is carved out
+        // by the Try region and continues at the group's end.
+        let mut eff = universe.clone();
+        // The walk root itself seeds the group expansion even when it lies
+        // OUTSIDE the passed universe: a protected branch target from a
+        // smaller group's body walk (jdk11 SocketChannelImpl.finishConnect's
+        // `if (!isConnected())` then-arm — block pc 39 belongs to the
+        // readLock/writeLock finally groups (39..174)/(39..167)/(46..105)
+        // but the If sits inside group (14..23), whose body universe is
+        // {2,3}; owner_scope then filtered everything and the expansion
+        // loop had nothing to key off) got sub = {from} alone — the arm
+        // emitted Goto{pc 46} and the ENTIRE connect-retry body (loop,
+        // endFinishConnect, return true) vanished, leaving the
+        // catch(IOException) try body unable to throw (不能抛出异常错误) and
+        // the blocking/connected locals dangling. The holds_start guard
+        // still blocks mid-group roots from ballooning (getInputStream0).
+        eff.insert(from);
+        let seed = eff.clone();
         for &b in &seed {
-            let Some(&gi) = self.body_group.get(&b) else { continue };
-            let g = &self.groups[gi];
-            // Expand to the full span ONLY when the scope holds the
-            // group's START block: a walk rooted mid-group must not
-            // balloon to the whole enclosing span (historic jdk11
-            // getInputStream0/finishConnect regressions guard this).
-            let holds_start = self
-                .block_at_start
-                .get(&g.start)
-                .is_some_and(|&nb| contains_eff(nb));
-            if !holds_start {
-                continue;
-            }
-            let hi = g.end.max(g.start + 1);
-            for nb in blocks_in_span(self.cfg, g.start, hi) {
-                if nb.ins_len != 0 {
-                    sub.insert(nb.id);
+            if let Some(&gi) = self.body_group.get(&b) {
+                let g = &self.groups[gi];
+                // Expand to the full span ONLY when the scope holds the
+                // group's START block: a walk rooted mid-group (a
+                // handler-restricted arm at a single continuation block,
+                // jdk11 getInputStream0's RT-catch arm -> block 33) must
+                // not balloon to the whole enclosing span — it dragged the
+                // entire method body into the catch with the handler's
+                // (nested-less) group visibility, emitting the reflection
+                // try's call bare (未报告的异常错误NoSuchFieldException).
+                let holds_start = self
+                    .cfg
+                    .blocks
+                    .iter()
+                    .any(|nb| nb.start == g.start && seed.contains(&nb.id));
+                if !holds_start {
+                    continue;
+                }
+                for nb in &self.cfg.blocks {
+                    if nb.ins_len != 0
+                        && nb.start >= g.start
+                        && nb.end <= g.end.max(g.start + 1)
+                    {
+                        eff.insert(nb.id);
+                    }
                 }
             }
         }
-        sub.retain(|b| contains_eff(*b) && !claimed.contains(b) && !self.is_handler(*b));
+        sub.retain(|b| eff.contains(b) && !claimed.contains(b) && !self.is_handler(*b));
         sub.insert(from);
         sub
     }
@@ -2573,24 +2389,6 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // or overflowing the stack.
         if self.walk_depth >= 256 {
             return Region::Goto { target: entry };
-        }
-        // Visit budget: same degradation as the depth guard (a Goto at the
-        // entry keeps conversion valid) once the exploration ran long.
-        {
-            if let Some(dl) = self.walk_deadline {
-                if std::time::Instant::now() >= dl {
-                    return Region::Goto { target: entry };
-                }
-            }
-            let left = self.walk_visits_left.get();
-            if left == 0 {
-                return Region::Goto { target: entry };
-            }
-            self.walk_visits_left.set(left - 1);
-            #[cfg(feature = "visit-stats")]
-            {
-                WALK_VISITS_TOTAL.with(|c| c.set(c.get() + 1));
-            }
         }
         self.walk_depth += 1;
         let r = self.walk_inner(entry, universe, stop, active, claimed, allow_claimed_entry);
@@ -4951,9 +4749,14 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         universe: &HashSet<usize>,
     ) -> bool {
         let gstart = self.groups[target_gi].start;
-        let Some(&target) = self.block_at_start.get(&gstart) else {
-            return false;
-        };
+        let mut start_blk: Option<usize> = None;
+        for nb in &self.cfg.blocks {
+            if nb.start == gstart {
+                start_blk = Some(nb.id);
+                break;
+            }
+        }
+        let Some(target) = start_blk else { return false };
         let mut seen: HashSet<usize> = HashSet::new();
         let mut q: VecDeque<usize> = VecDeque::new();
         q.push_back(from);
@@ -4996,21 +4799,6 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
     /// from the render entirely, 缺少返回语句).
     fn expand_orphan_group_tails(&self, out: &mut HashSet<usize>, from: usize) {
         let structuring = self.structuring_groups.borrow().clone();
-        let groups_in_out: Vec<usize> = out
-            .iter()
-            .filter_map(|&x| self.body_group.get(&x).copied())
-            .collect::<std::collections::HashSet<usize>>()
-            .into_iter()
-            .collect();
-        let body_or_handler_in: std::collections::HashSet<usize> = out
-            .iter()
-            .filter_map(|&x| {
-                self.body_group
-                    .get(&x)
-                    .or_else(|| self.handler_group.get(&x))
-                    .copied()
-            })
-            .collect();
         let mut frontier: Vec<usize> = vec![from];
         let mut seen: HashSet<usize> = HashSet::new();
         let mut guard = 0;
@@ -5046,9 +4834,10 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 // try, structured by the sibling arm) keep adopting:
                 // their tail will never be emitted elsewhere.
                 let start_held = self
-                    .block_at_start
-                    .get(&og.start)
-                    .is_some_and(|&nb| out.contains(&nb));
+                    .cfg
+                    .blocks
+                    .iter()
+                    .any(|nb| nb.start == og.start && out.contains(&nb.id));
                 if structuring.contains(&ogi) || start_held {
                     continue;
                 }
@@ -5057,15 +4846,17 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
                 // the owner walk handles it (ZipFile.getComment's
                 // enclosing-group tail; Module.loadModuleInfoClass's
                 // post-try cont) — never an orphan.
-                let inside_active = body_or_handler_in.contains(&ogi);
+                let inside_active = out.iter().any(|&x| {
+                    self.body_group.get(&x) == Some(&ogi)
+                        || self.handler_group.get(&x) == Some(&ogi)
+                });
                 if inside_active {
                     continue;
                 }
-                // Perf: group-scan × out-scan was O(G·|out|) per frontier
-                // step — one pass materializes the groups present in out.
-                if groups_in_out.iter().any(|&gi| {
-                    let g = &self.groups[gi];
-                    g.start <= og.start && g.end >= og.end
+                if self.groups.iter().enumerate().any(|(gi, g)| {
+                    out.iter().any(|&x| self.body_group.get(&x) == Some(&gi))
+                        && g.start <= og.start
+                        && g.end >= og.end
                 }) {
                     continue;
                 }
