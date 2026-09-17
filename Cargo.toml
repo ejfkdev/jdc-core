@@ -13,6 +13,7 @@ bitflags = "2"
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
+visit-stats = []
 default = []
 # Serialize the shared type model (`types::*`): a front-end that offers a JSON
 # dump of its parse turns this on and forwards it from its own feature.

@@ -25,6 +25,16 @@ use crate::ir::expr::Expr;
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+/// Method-invariant inputs of `immediate_postdom` (see postdom_ipdom).
+struct PostdomCtx {
+    exempt: HashSet<usize>,
+    terminators: HashSet<usize>,
+    final_writers: HashSet<usize>,
+    abrupt_only: HashSet<usize>,
+    stmt_counts: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
 pub struct DomInfo {
     pub idom: Vec<usize>,
 }
@@ -255,6 +265,38 @@ thread_local! {
 /// Install/clear the per-method walk-visit budget (see WALK_VISIT_OVERRIDE).
 pub fn set_walk_visit_budget(v: Option<u64>) {
     WALK_VISIT_OVERRIDE.with(|c| c.set(v));
+}
+
+thread_local! {
+    /// Per-method walk wall-clock deadline (None = off). The visit budget
+    /// is deterministic but only bounds CALL COUNT — one pathological
+    /// method (Telegram SendMessagesHelper.sendMessage, 1734 blocks)
+    /// spends ~6ms per visit in scope/set construction, so even a tight
+    /// visit budget ran minutes. The deadline cuts the walk at a fixed
+    /// time; degradation is a Goto, same as the visit budget.
+    static WALK_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install/clear the per-method walk deadline.
+pub fn set_walk_deadline(d: Option<std::time::Instant>) {
+    WALK_DEADLINE.with(|c| c.set(d));
+}
+
+/// Walk() calls consumed by the last method (feature "visit-stats").
+#[cfg(feature = "visit-stats")]
+thread_local! {
+    pub static WALK_VISITS_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "visit-stats")]
+pub fn walk_visits_consumed() -> u64 {
+    WALK_VISITS_TOTAL.with(|c| c.get())
+}
+
+#[cfg(feature = "visit-stats")]
+pub fn reset_visit_stats() {
+    WALK_VISITS_TOTAL.with(|c| c.set(0));
 }
 
 /// Blocks normally reachable from `entry` without entering `stop`.
@@ -1385,6 +1427,10 @@ pub struct Structurer<'a> {
     walk_depth: usize,
     /// Remaining walk visits when WALK_VISIT_OVERRIDE armed (u64::MAX = off).
     walk_visits_left: std::cell::Cell<u64>,
+    /// Method-invariant rejection sets for postdom_ipdom, computed once.
+    postdom_ctx: std::cell::OnceCell<PostdomCtx>,
+    /// Walk wall-clock deadline (see set_walk_deadline).
+    walk_deadline: Option<std::time::Instant>,
     /// Per-method ticket budget for COPY-producing mechanisms
     /// (copy_walk, PARKCHAIN chain completions, per-arrival fills).
     /// Nested copies multiply: jdk8 java.awt.Toolkit.eventDispatched's
@@ -2043,56 +2089,77 @@ impl<'a> Structurer<'a> {
         for (&merge, (root, _vis)) in &fold_regions {
             fold_root_to_merge.insert(*root, merge);
         }
-        Structurer { cfg, results, groups, body_group, handler_group, diamond_merges, fold_regions, fold_root_to_merge, copied_tails: HashSet::new(), loops_stack: Vec::new(), switch_depth: 0, case_arm_ctx: Vec::new(), sese_loop_headers: std::collections::HashSet::new(), sese_exc_retry_headers: std::collections::HashSet::new(), block_at_start: cfg.blocks.iter().map(|b| (b.start, b.id)).collect(), walk_depth: 0, walk_visits_left: std::cell::Cell::new(WALK_VISIT_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX)), copy_budget: std::cell::Cell::new(BUDGET_OVERRIDE.with(|c| c.get()).or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32)).unwrap_or(512)), final_fields: HashSet::new(), structuring_groups: std::cell::RefCell::new(Vec::new()) }
+        Structurer { cfg, results, groups, body_group, handler_group, diamond_merges, fold_regions, fold_root_to_merge, copied_tails: HashSet::new(), loops_stack: Vec::new(), switch_depth: 0, case_arm_ctx: Vec::new(), sese_loop_headers: std::collections::HashSet::new(), sese_exc_retry_headers: std::collections::HashSet::new(), block_at_start: cfg.blocks.iter().map(|b| (b.start, b.id)).collect(), walk_depth: 0, walk_visits_left: std::cell::Cell::new(WALK_VISIT_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX)), copy_budget: std::cell::Cell::new(BUDGET_OVERRIDE.with(|c| c.get()).or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32)).unwrap_or(512)), final_fields: HashSet::new(), structuring_groups: std::cell::RefCell::new(Vec::new()), postdom_ctx: std::cell::OnceCell::new(), walk_deadline: WALK_DEADLINE.with(|c| c.get()) }
     }
 
     /// Immediate post-dominator of `entry` within `universe`. Delegates to the
     /// O(n) `immediate_postdom` (BFS nearest-confluence with successor-candidate
     /// rejection); kept as a `&mut self` method for call-site convenience.
     pub(crate) fn postdom_ipdom(&mut self, universe: &HashSet<usize>, entry: usize) -> Option<usize> {
-        // Successor-candidate rejection exempts every GROUP-OWNED block
-        // (whole try bodies and handler heads, not just group starts):
-        // rejecting an in-body successor re-routes the COND walk across
-        // the carve-out boundary and dissolved
-        // HttpURLConnection.getInputStream0's inner try/catch (bare 'try'
-        // x3 sites x3 trees — the rejected taken target at pc 813 sits
-        // mid-range of the 283..1853 protected body), while the
-        // statement-block rejection outside groups (OCSP/Driver/
-        // AnnotationType families) stays.
-        let mut exempt: HashSet<usize> = self.handler_group.keys().copied().collect();
-        for g in &self.groups {
-            if let Some(b) = self.cfg.block_at(g.start) {
-                exempt.insert(b);
-            }
-        }
+        // The exempt/terminators/final_writers/abrupt_only/stmt_counts
+        // sets are METHOD-INVARIANT (they depend only on the pool results
+        // and the group topology), yet the old body rebuilt all of them —
+        // several O(n) HashSet constructions — on EVERY call, and
+        // walk_inner consults postdom_ipdom at every IF decision. The
+        // exponential explorations (Telegram SendMessagesHelper.
+        // sendMessage: 1734 blocks) burned minutes inside these rebuilds
+        // before any visit budget could fire; legit methods paid them
+        // per if-statement too. Compute once, reuse forever.
+        let ctx = self
+            .postdom_ctx
+            .get_or_init(|| {
+                // Successor-candidate rejection exempts every GROUP-OWNED
+                // block (whole try bodies and handler heads, not just group
+                // starts): rejecting an in-body successor re-routes the
+                // COND walk across the carve-out boundary and dissolved
+                // HttpURLConnection.getInputStream0's inner try/catch,
+                // while the statement-block rejection outside groups stays.
+                let mut exempt: HashSet<usize> =
+                    self.handler_group.keys().copied().collect();
+                for g in &self.groups {
+                    if let Some(b) = self.cfg.block_at(g.start) {
+                        exempt.insert(b);
+                    }
+                }
+                let terminators: HashSet<usize> = (0..self.results.len())
+                    .filter(|&b| self.is_terminator_block(b))
+                    .collect();
+                let final_writers: HashSet<usize> = (0..self.results.len())
+                    .filter(|&b| self.terminator_writes_final(b))
+                    .collect();
+                // Blocks whose every CFG exit is abrupt (return/throw or
+                // none): a route landing there dies before any parked
+                // merge, so it never skips a shared RETURN tail.
+                let mut abrupt_only: HashSet<usize> = HashSet::new();
+                for b in 0..self.results.len() {
+                    let term_abrupt = matches!(
+                        self.results[b].term,
+                        crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
+                    );
+                    let succs_abrupt = !self.cfg.blocks[b].succ.is_empty()
+                        && self.cfg.blocks[b].succ.iter().all(|&x| terminators.contains(&x));
+                    if term_abrupt || succs_abrupt {
+                        abrupt_only.insert(b);
+                    }
+                }
+                let stmt_counts: Vec<usize> =
+                    self.results.iter().map(|r| r.stmts.len()).collect();
+                PostdomCtx { exempt, terminators, final_writers, abrupt_only, stmt_counts }
+            });
         let entry_group = self.body_group.get(&entry).copied();
-        let terminators: HashSet<usize> = (0..self.results.len())
-            .filter(|&b| self.is_terminator_block(b))
-            .collect();
-        let final_writers: HashSet<usize> = (0..self.results.len())
-            .filter(|&b| self.terminator_writes_final(b))
-            .collect();
-        // Blocks whose every CFG exit is abrupt (return/throw or none):
-        // a route landing there dies before any parked merge, so it
-        // never skips a shared RETURN tail (CHM.equals' method-final
-        // `return true` at pc 211 was rejected because the loop body's
-        // `return false` confluence cannot reach it — parking the tail
-        // is correct there; only DHKey's shared THROW needs the live
-        // skip route rejected).
-        let mut abrupt_only: HashSet<usize> = HashSet::new();
-        for b in 0..self.results.len() {
-            let term_abrupt = matches!(
-                self.results[b].term,
-                crate::ir::build::Term::Return(_) | crate::ir::build::Term::Throw(_)
-            );
-            let succs_abrupt = !self.cfg.blocks[b].succ.is_empty()
-                && self.cfg.blocks[b].succ.iter().all(|&x| terminators.contains(&x));
-            if term_abrupt || succs_abrupt {
-                abrupt_only.insert(b);
-            }
-        }
-        let stmt_counts: Vec<usize> = self.results.iter().map(|r| r.stmts.len()).collect();
-        immediate_postdom(self.cfg, self.results, universe, entry, &exempt, &stmt_counts, &self.body_group, entry_group, &terminators, &abrupt_only, &final_writers)
+        immediate_postdom(
+            self.cfg,
+            self.results,
+            universe,
+            entry,
+            &ctx.exempt,
+            &ctx.stmt_counts,
+            &self.body_group,
+            entry_group,
+            &ctx.terminators,
+            &ctx.abrupt_only,
+            &ctx.final_writers,
+        )
     }
 
 
@@ -2510,11 +2577,20 @@ fn ctx_is_loop_header(s: &Structurer, t: usize) -> bool {
         // Visit budget: same degradation as the depth guard (a Goto at the
         // entry keeps conversion valid) once the exploration ran long.
         {
+            if let Some(dl) = self.walk_deadline {
+                if std::time::Instant::now() >= dl {
+                    return Region::Goto { target: entry };
+                }
+            }
             let left = self.walk_visits_left.get();
             if left == 0 {
                 return Region::Goto { target: entry };
             }
             self.walk_visits_left.set(left - 1);
+            #[cfg(feature = "visit-stats")]
+            {
+                WALK_VISITS_TOTAL.with(|c| c.set(c.get() + 1));
+            }
         }
         self.walk_depth += 1;
         let r = self.walk_inner(entry, universe, stop, active, claimed, allow_claimed_entry);
