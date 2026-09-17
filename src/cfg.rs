@@ -181,6 +181,11 @@ impl Cfg {
         self.blocks.is_empty()
     }
 
+    /// Index of the first block whose start >= `p` (starts are sorted).
+    pub fn starts_partition(&self, p: u32) -> usize {
+        self.starts.partition_point(|&l| l < p)
+    }
+
     /// True if `p` starts a block.
     pub fn is_block_start(&self, p: u32) -> bool {
         self.starts.binary_search(&p).is_ok()

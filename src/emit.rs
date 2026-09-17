@@ -23,6 +23,9 @@ pub struct Printer<'a> {
     /// consulted depth-1's vt, 已在方法中定义了变量 i$).
     outer_names: Vec<String>,
     /// True when the enclosing method returns boolean.
+    /// Reused per-statement line buffer (millions of statements: the
+    /// fresh-String-per-line pattern re-allocated and re-grew each time).
+    line_buf: String,
     pub ret_bool: bool,
     /// True while rendering the ROOT of an expression statement: a
     /// signature-polymorphic call there must stay bare (`NEXT.compareAndSet
@@ -64,7 +67,7 @@ pub struct Printer<'a> {
 
 impl<'a> Printer<'a> {
     pub fn new(ctx: &'a dyn crate::ctx::Ctx, vt: &'a VarTable) -> Self {
-        Printer { ctx, vt, out: String::new(), indent: 0, lambda_depth: 0, outer_names: Vec::new(), ret_bool: false, suppress_poly_cast: false, suppress_diamond: false, in_cond: false, lambda_sam_ret: None, ret_sam: None, ret_char: false, ret_byte: false, ret_short: false }
+        Printer { ctx, vt, out: String::new(), indent: 0, lambda_depth: 0, outer_names: Vec::new(), line_buf: String::new(), ret_bool: false, suppress_poly_cast: false, suppress_diamond: false, in_cond: false, lambda_sam_ret: None, ret_sam: None, ret_char: false, ret_byte: false, ret_short: false }
     }
 
     pub fn with_ret_bool(mut self, b: bool) -> Self {
@@ -94,8 +97,15 @@ impl<'a> Printer<'a> {
     }
 
     pub fn into_string(mut self, body: &Stmt) -> String {
-        let body = truncate_dead_ends(body);
-        self.stmt(&body);
+        // The old unconditional truncate_dead_ends rebuilt (deep-cloned)
+        // the whole statement tree per method — a top profile cost. The
+        // truncation case is rare: probe read-only first.
+        if tree_has_dead_end(body) {
+            let truncated = truncate_dead_ends(body);
+            self.stmt(&truncated);
+        } else {
+            self.stmt(body);
+        }
         self.out
     }
 
@@ -237,11 +247,23 @@ impl<'a> Printer<'a> {
     // ---------------- statements ----------------
 
     fn line(&mut self, s: &str) {
-        for _ in 0..self.indent {
-            self.out.push_str("    ");
-        }
+        self.push_indent();
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    /// Indentation as one contiguous push (the per-level push_str loop
+    /// ran per printed line).
+    fn push_indent(&mut self) {
+        const UNIT: &str = "                                "; // 32 spaces
+        let mut n = self.indent * 4;
+        while n >= 32 {
+            self.out.push_str(UNIT);
+            n -= 32;
+        }
+        if n > 0 {
+            self.out.push_str(&UNIT[..n]);
+        }
     }
 
     /// Render an int-typed expression in a byte/short target: constants
@@ -362,7 +384,8 @@ impl<'a> Printer<'a> {
                 }
             }
             Stmt::ExprStmt(e) => {
-                let mut line = String::new();
+                let mut line = std::mem::take(&mut self.line_buf);
+                line.clear();
                 if matches!(e, Expr::Method { .. }) {
                     self.suppress_poly_cast = true;
                 }
@@ -370,11 +393,13 @@ impl<'a> Printer<'a> {
                 self.suppress_poly_cast = false;
                 line.push(';');
                 self.line(&line);
+                self.line_buf = line;
             }
             Stmt::LocalDef { var, init, is_final, force_type } => {
                 let _ = force_type;
                 let info = self.vt.var(*var);
-                let mut line = String::new();
+                let mut line = std::mem::take(&mut self.line_buf);
+                line.clear();
                 if *is_final {
                     line.push_str("final ");
                 }
@@ -424,6 +449,7 @@ impl<'a> Printer<'a> {
                 }
                 line.push(';');
                 self.line(&line);
+                self.line_buf = line;
             }
             Stmt::Return(Some(e)) => {
                 let mut line = String::from("return ");
@@ -865,6 +891,7 @@ impl<'a> Printer<'a> {
             ctx: self.ctx,
             vt: self.vt,
             out: String::new(),
+            line_buf: String::new(),
             indent: 0,
             lambda_depth: self.lambda_depth,
             outer_names: self.outer_names.clone(),
@@ -2341,6 +2368,7 @@ impl<'a> Printer<'a> {
                             ctx: self.ctx,
                             vt: &vt,
                             out: String::new(),
+                            line_buf: String::new(),
                             indent: self.indent,
                             lambda_depth: self.lambda_depth + 1,
                             outer_names: {
@@ -2911,6 +2939,48 @@ pub fn format_float(v: f64, is_float: bool) -> String {
 /// switch restoration and goto resolution) so the break inventory is
 /// exactly what gets emitted; every unknown shape stays conservative
 /// (assumes the loop can complete).
+fn tree_has_dead_end(s: &Stmt) -> bool {
+    match s {
+        Stmt::Block(v) => {
+            for (i, x) in v.iter().enumerate() {
+                if i > 0 && dead_end_infinite_while(&v[i - 1]) {
+                    return true;
+                }
+                if tree_has_dead_end(x) {
+                    return true;
+                }
+            }
+            false
+        }
+        Stmt::If { then_stmt, else_stmt, .. } => {
+            tree_has_dead_end(then_stmt)
+                || else_stmt.as_deref().is_some_and(tree_has_dead_end)
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => tree_has_dead_end(body),
+        Stmt::For { init, body, .. } => {
+            init.iter().any(tree_has_dead_end) || tree_has_dead_end(body)
+        }
+        Stmt::ForEach { body, .. } => tree_has_dead_end(body),
+        Stmt::Switch { cases, default, .. } => {
+            cases.iter().any(|c| c.body.iter().any(tree_has_dead_end))
+                || default.as_deref().is_some_and(tree_has_dead_end)
+        }
+        Stmt::Try { body, catches, finally } => {
+            tree_has_dead_end(body)
+                || catches.iter().any(|c| tree_has_dead_end(&c.body))
+                || finally.as_deref().is_some_and(tree_has_dead_end)
+        }
+        Stmt::TryWithResources { resources, body, catches, finally, .. } => {
+            resources.iter().any(tree_has_dead_end)
+                || tree_has_dead_end(body)
+                || catches.iter().any(|c| tree_has_dead_end(&c.body))
+                || finally.as_deref().is_some_and(tree_has_dead_end)
+        }
+        Stmt::Synchronized { body, .. } | Stmt::Labeled { body, .. } => tree_has_dead_end(body),
+        _ => false,
+    }
+}
+
 fn truncate_dead_ends(s: &Stmt) -> Stmt {
     match s {
         Stmt::Block(v) => {

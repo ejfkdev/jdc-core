@@ -184,10 +184,31 @@ impl<'a> Converter<'a> {
     pub fn new(cfg: &'a Cfg, results: &'a Vec<BlockResult>) -> Self {
         let universe: HashSet<usize> = (0..cfg.blocks.len()).collect();
         let dom = crate::structure::compute_dominators(cfg, &universe, cfg.entry);
+        let groups = crate::structure::group_exceptions_with(cfg, Some(results));
+        Self::from_parts(cfg, results, groups, dom)
+    }
+
+    /// `new` with the group set and dominator tree precomputed and shared
+    /// with the Structurer (see `Structurer::with_precomputed_groups`).
+    pub fn with_precomputed(
+        cfg: &'a Cfg,
+        results: &'a Vec<BlockResult>,
+        groups: Vec<crate::structure::TryGroup>,
+        dom: crate::structure::DomInfo,
+    ) -> Self {
+        Self::from_parts(cfg, results, groups, dom)
+    }
+
+    fn from_parts(
+        cfg: &'a Cfg,
+        results: &'a Vec<BlockResult>,
+        groups: Vec<crate::structure::TryGroup>,
+        dom: crate::structure::DomInfo,
+    ) -> Self {
         Converter {
             cfg,
             results,
-            groups: crate::structure::group_exceptions_with(cfg, Some(results)),
+            groups,
             dom,
             cur_block: usize::MAX,
             loops: Vec::new(),
