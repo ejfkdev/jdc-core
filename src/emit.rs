@@ -416,6 +416,15 @@ impl<'a> Printer<'a> {
                 }
             }
             Stmt::ExprStmt(e) => {
+                if !is_statement_expr(e) {
+                    // Only assignments/calls/inc-dec/new are legal
+                    // expression statements; a leftover pure concat
+                    // (`"" + 48;`) renders as a comment instead.
+                    let mut text = String::new();
+                    self.expr(e, 0, &mut text);
+                    self.line(&format!("/* {text}; */"));
+                    return;
+                }
                 let mut line = std::mem::take(&mut self.line_buf);
                 line.clear();
                 if matches!(e, Expr::Method { .. }) {
@@ -1294,17 +1303,25 @@ impl<'a> Printer<'a> {
                     // bytecode owner is often a synthetic holder class
                     // (`ConstantGroup$1`) whose shorten() fallback is
                     // `Object` — a qualified read can never resolve.
-                    out.push_str(name);
+                    out.push_str(&java_ident(name));
                 } else if name == "length" && cls.is_empty() {
                     if let Some(o) = owner {
                         self.expr(o, 15, out);
                     }
                     out.push_str(".length");
                 } else if let Some(o) = owner {
-                    if matches!(o.as_ref(), Expr::Raw(t) if t == "\u{3}") {
+                    if let Expr::Const(_) = o.as_ref() {
+                        // Receiver tracking lost (a null placeholder leaked
+                        // through): `0.b` is not parseable — the same
+                        // cast-null form the Method arm uses.
+                        out.push_str("((");
+                        out.push_str(&self.shorten(cls));
+                        out.push_str(") null).");
+                        out.push_str(&java_ident(name));
+                    } else if matches!(o.as_ref(), Expr::Raw(t) if t == "\u{3}") {
                         // Outer anonymous class member: unqualified lexical
                         // resolution (an anon outer has no nameable this).
-                        out.push_str(name);
+                        out.push_str(&java_ident(name));
                     } else if self.private_super_field(cls, name, o.as_ref()) {
                         // A private field of a SUPERCLASS is not inherited
                         // into the subclass's member scope: `this.algorithm`
@@ -1322,11 +1339,11 @@ impl<'a> Printer<'a> {
                             self.expr(o, 14, out);
                         }
                         out.push_str(").");
-                        out.push_str(name);
+                        out.push_str(&java_ident(name));
                     } else {
                         self.expr(o, 15, out);
                         out.push('.');
-                        out.push_str(name);
+                        out.push_str(&java_ident(name));
                     }
                 } else if *is_static {
                     // A same-class static read prints bare — unless a local
@@ -1378,15 +1395,15 @@ impl<'a> Printer<'a> {
                         out.push_str(&self.shorten(cls));
                         out.push('.');
                     }
-                    out.push_str(name);
+                    out.push_str(&java_ident(name));
                 } else if self.private_super_field(cls, name, &Expr::This) {
                     out.push_str("((");
                     out.push_str(&self.shorten(cls));
                     out.push_str(") this).");
-                    out.push_str(name);
+                    out.push_str(&java_ident(name));
                 } else {
                     out.push_str("this.");
-                    out.push_str(name);
+                    out.push_str(&java_ident(name));
                 }
             }
             Expr::Method {
@@ -1510,7 +1527,16 @@ impl<'a> Printer<'a> {
                         }
                         out.push_str("super.");
                     } else if let Some(o) = owner {
-                        if let Expr::Lambda(l) = o.as_ref() {
+                        if let Expr::Const(_) = o.as_ref() {
+                            // Receiver tracking lost: a null placeholder
+                            // (const/4 0) leaked through as the receiver —
+                            // `0.close()` is not parseable. Cast-null keeps
+                            // the statement compilable and honestly marks
+                            // the value as unknown on this path.
+                            out.push_str("((");
+                            out.push_str(&self.shorten(cls));
+                            out.push_str(") null).");
+                        } else if let Expr::Lambda(l) = o.as_ref() {
                             // A lambda RECEIVER needs the source's SAM cast
                             // (`((BooleanSupplier) () -> ..).getAsBoolean()`
                             // — a bare lambda cannot own a call: 此处不应为
@@ -2749,6 +2775,13 @@ impl<'a> Printer<'a> {
     }
 
     pub fn shorten(&self, internal: &str) -> String {
+        // Class-file names may contain characters Java cannot parse
+        // (R8 desugared `Collection$-EL`) — EVERY return path runs the
+        // deterministic sanitizer (early returns bypassed it).
+        sanitize_source_name(&self.shorten_inner(internal))
+    }
+
+    fn shorten_inner(&self, internal: &str) -> String {
         if internal.is_empty() {
             return String::new();
         }
@@ -2759,12 +2792,14 @@ impl<'a> Printer<'a> {
         // segments, and `$` is a legal identifier character while `A..b` is
         // not.
         let dot_safe = |simple: &str| -> bool {
-            simple.split('$').skip(1).all(|seg| {
+            // A LEADING `$` (`$Gson$Types`) is part of the source name —
+            // dotting it yields `.Gson.Types` with a leading dot.
+            simple.split('$').all(|seg| {
                 !seg.is_empty()
                     && seg
                         .chars()
                         .next()
-                        .map(|c| !c.is_ascii_digit())
+                        .map(|c| c.is_ascii_alphabetic() || c == '_')
                         .unwrap_or(false)
             })
         };
@@ -2772,7 +2807,13 @@ impl<'a> Printer<'a> {
         let keep_dollar_pool = internal.contains('$')
             && self.ctx.has_class(internal)
             && self.ctx.find_outer(internal).is_none();
-        let keep_dollar = keep_dollar_pool || (internal.contains('$') && !dot_safe(&simple_here));
+        // R8 desugared-library names carry `$` inside the PACKAGE path
+        // (`j$/util/Collection$-EL`): a `$` followed by `/` is never a
+        // nesting boundary — dotting it produced `j..util`.
+        let dollar_in_pkg = internal.contains("$/");
+        let keep_dollar = keep_dollar_pool
+            || dollar_in_pkg
+            || (internal.contains('$') && !dot_safe(&simple_here));
         // Anonymous class types (all-digit last segment) have no source
         // name: print the base interface/superclass instead.
         if let Some(last) = internal.rsplit('$').next() {
@@ -3036,11 +3077,14 @@ fn prim_name(c: char) -> &'static str {
 /// other non-identifier character is not legal Java. Deterministic
 /// mapping; ddc's classdec applies the identical rule at declarations.
 pub fn java_ident(name: &str) -> String {
-    if name
+    let clean = name
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-    {
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    let keyword = is_java_keyword(name);
+    if clean && !keyword {
         name.to_string()
+    } else if keyword {
+        format!("_{name}")
     } else {
         name.chars()
             .map(|c| {
@@ -3054,9 +3098,70 @@ pub fn java_ident(name: &str) -> String {
     }
 }
 
+/// Java reserved words (plus the null/true/false literals): Kotlin emits
+/// methods and fields named `default` (Companion.default()) — no Java
+/// program can name them, so both ddc's declarations and these call
+/// sites map them to `_<name>` identically.
+pub fn is_java_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "abstract" | "assert" | "boolean" | "break" | "byte" | "case" | "catch" | "char"
+            | "class" | "const" | "continue" | "default" | "do" | "double" | "else" | "enum"
+            | "extends" | "final" | "finally" | "float" | "for" | "goto" | "if" | "implements"
+            | "import" | "instanceof" | "int" | "interface" | "long" | "native" | "new"
+            | "package" | "private" | "protected" | "public" | "return" | "short" | "static"
+            | "strictfp" | "super" | "switch" | "synchronized" | "this" | "throw" | "throws"
+            | "transient" | "try" | "void" | "volatile" | "while" | "true" | "false" | "null"
+    )
+}
+
 /// `this` in its Raw encoding (prints as `this`; see the Raw arm).
 fn is_this_expr(e: &Expr) -> bool {
     matches!(e, Expr::Raw(t) if t == "\u{3}")
+}
+
+/// Class-file names may contain characters Java source identifiers
+/// cannot (R8 desugared `Collection$-EL`); deterministic -→_ mapping,
+/// matching ddc's declaration-site java_ident.
+/// Legal Java expression-statement forms (JLS 14.8): assignment, method
+/// invocation, inc/dec, class instance creation.
+fn is_statement_expr(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Assign { .. }
+            | Expr::Method { .. }
+            | Expr::New { .. }
+            | Expr::PreIncDec { .. }
+            | Expr::PostIncDec { .. }
+    )
+}
+
+pub fn sanitize_source_name(name: &str) -> String {
+    // Obfuscators emit classes named `if`/`do`: the last segment maps to
+    // `_<seg>` exactly like ddc's declaration/keyword sites.
+    let last = name.rsplit(['.', '$']).next().unwrap_or(name);
+    let kw = is_java_keyword(last);
+    let base = if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+        && !kw
+    {
+        name.to_string()
+    } else if kw {
+        let head = &name[..name.len() - last.len()];
+        format!("{head}_{last}")
+    } else {
+        name.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    base
 }
 
 pub fn escape_string(s: &str) -> String {
