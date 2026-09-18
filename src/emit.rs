@@ -728,6 +728,12 @@ impl<'a> Printer<'a> {
                     self.stmt(f);
                     self.indent -= 1;
                 }
+                // A try with no catches and no finally is not valid Java
+                // (the structurer can emit a bare degenerate try); an
+                // empty finally keeps the statement compilable.
+                if catches.is_empty() && finally.is_none() {
+                    self.line("} finally {");
+                }
                 self.line("}");
             }
             Stmt::TryWithResources {
@@ -832,15 +838,18 @@ impl<'a> Printer<'a> {
                 self.line(&line);
             }
             Stmt::MonitorEnter(e) => {
-                let mut line = String::from("/* monitorenter */ ");
+                // The lock expression goes INSIDE the comment: a bare
+                // local/field is not a valid expression statement
+                // (`/* monitorenter */ a;` failed javac).
+                let mut line = String::from("/* monitorenter ");
                 self.expr(e, 1, &mut line);
-                line.push(';');
+                line.push_str(" */");
                 self.line(&line);
             }
             Stmt::MonitorExit(e) => {
-                let mut line = String::from("/* monitorexit */ ");
+                let mut line = String::from("/* monitorexit ");
                 self.expr(e, 1, &mut line);
-                line.push(';');
+                line.push_str(" */");
                 self.line(&line);
             }
             Stmt::ClassDecl { header, body, .. } => {
@@ -1109,6 +1118,16 @@ impl<'a> Printer<'a> {
                 } else if self.is_member_inner(cls)
                     && !args.is_empty()
                     && !matches!(args[0], Expr::This)
+                    && !is_this_expr(&args[0])
+                    // A constant (null/0) as the first argument is a real
+                    // parameter value, not the synthetic outer instance —
+                    // `0.new a()` / `null.new a()` are not valid Java.
+                    && !matches!(args[0], Expr::Const(_))
+                    // Anonymous classes (digit simple names) are emitted
+                    // as separate top-level-ish classes here — a
+                    // qualified `this.new 1(...)` is not valid Java; the
+                    // plain `new Outer$1(...)` form is.
+                    && !inner_simple(cls).starts_with(|c: char| c.is_ascii_digit())
                 {
                     // `outerExpr.new Inner(rest...)` — the first ctor arg
                     // is the synthetic outer instance when the class has a
@@ -1587,7 +1606,7 @@ impl<'a> Printer<'a> {
                         out.push_str(&type_args.join(", "));
                         out.push('>');
                     }
-                    out.push_str(name);
+                    out.push_str(&java_ident(name));
                     out.push('(');
                     // Lambda args of a GENERIC call: prime each one's
                     // body-return cast from the instantiated formal's SAM
@@ -1909,8 +1928,12 @@ impl<'a> Printer<'a> {
             }
             Expr::StringConcat(parts) => {
                 let mut first = true;
-                // Java semantics: the concatenation must start with a String.
-                let needs_prefix = !matches!(parts.first(), Some(ConcatPart::Const(_)));
+                // Java semantics: the concatenation must start with a
+                // String. NOT for an empty parts list: the trailing
+                // is_empty guard below already prints `""` — both firing
+                // printed four quotes.
+                let needs_prefix =
+                    !parts.is_empty() && !matches!(parts.first(), Some(ConcatPart::Const(_)));
                 if needs_prefix {
                     out.push_str("\"\"");
                     first = false;
@@ -3007,6 +3030,33 @@ fn prim_name(c: char) -> &'static str {
         'D' => "double",
         _ => "?",
     }
+}
+
+/// Kotlin emits method names like `invokeSuspend$lambda-0` — `-` and any
+/// other non-identifier character is not legal Java. Deterministic
+/// mapping; ddc's classdec applies the identical rule at declarations.
+pub fn java_ident(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
+        name.to_string()
+    } else {
+        name.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+}
+
+/// `this` in its Raw encoding (prints as `this`; see the Raw arm).
+fn is_this_expr(e: &Expr) -> bool {
+    matches!(e, Expr::Raw(t) if t == "\u{3}")
 }
 
 pub fn escape_string(s: &str) -> String {
