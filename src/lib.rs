@@ -30,6 +30,7 @@ pub mod ctx;
 pub mod dbg;
 pub mod emit;
 pub mod ir;
+pub mod rename;
 pub mod sese;
 pub mod structure;
 pub mod types;

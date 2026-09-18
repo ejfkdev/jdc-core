@@ -1306,7 +1306,13 @@ impl<'a> Printer<'a> {
                     out.push_str(&java_ident(name));
                 } else if name == "length" && cls.is_empty() {
                     if let Some(o) = owner {
-                        self.expr(o, 15, out);
+                        if let Expr::Const(_) = o.as_ref() {
+                            // Receiver tracking lost: `0.length` is not
+                            // parseable — cast-null array form.
+                            out.push_str("((java.lang.Object[]) null)");
+                        } else {
+                            self.expr(o, 15, out);
+                        }
                     }
                     out.push_str(".length");
                 } else if let Some(o) = owner {
@@ -1433,6 +1439,24 @@ impl<'a> Printer<'a> {
                     }
                 }
                 if name == "<init>" && *is_special {
+                    // The ctor fold normally turns `new X; <init>` into a
+                    // New expr at the LIFT. When the new-instance view was
+                    // lost (crossed a merge / got materialized), the call
+                    // arrives here with a NON-this receiver: rendering a
+                    // this/super delegation produced `this.super(...)`,
+                    // which is not valid Java. The allocation did happen —
+                    // print the construction call.
+                    let lost_alloc = owner
+                        .as_deref()
+                        .is_some_and(|o| !is_this_expr(o) && !matches!(o, Expr::This));
+                    if lost_alloc {
+                        out.push_str("new ");
+                        out.push_str(&self.shorten(cls));
+                        out.push('(');
+                        self.args(args, out);
+                        out.push(')');
+                        return;
+                    }
                     // super(...) / this(...)
                     let is_super_form = *is_super || cls != &self.ctx.class_name();
                     // Qualified super for a STATIC class extending an
@@ -1462,7 +1486,16 @@ impl<'a> Printer<'a> {
                     } else {
                         None
                     };
-                    if qualified_outer.is_some() {
+                    // The enclosing instance passed explicitly is `this`
+                    // itself (qualified_outer found the enclosing, but the
+                    // argument IS this class's own outer): the source form
+                    // is plain `super(rest...)` — the implicit outer —
+                    // because `this.super(...)` is not valid Java (weibo
+                    // HorseRaceDetector, reqable androidx.fragment.app.d).
+                    let this_outer =
+                        is_super_form && !args.is_empty() && is_this_expr(&args[0]);
+                    let skip_outer_arg = qualified_outer.is_some() || this_outer;
+                    if qualified_outer.is_some() && !this_outer {
                         self.expr(&args[0], 15, out);
                         out.push_str(".super(");
                     } else if is_super_form {
@@ -1487,7 +1520,7 @@ impl<'a> Printer<'a> {
                     // generic formals — casting there broke FindOps
                     // `super(parent, spliterator)` (K := FindTask<..>
                     // accepts the arg fine; the raw erasure cast does not).
-                    if qualified_outer.is_some() {
+                    if skip_outer_arg {
                         if desc.args.len() == args.len() && desc.args.len() >= 1 {
                             self.args_typed(&args[1..], &desc.args[1..], out);
                         } else {
@@ -2785,6 +2818,10 @@ impl<'a> Printer<'a> {
         if internal.is_empty() {
             return String::new();
         }
+        // Case-collision renames (`X/Cua` → `X/Cua_2`): the registry is
+        // empty for ordinary corpora — one relaxed atomic load.
+        let cow = crate::rename::apply_class_rename(internal);
+        let internal: &str = &cow;
         // Literal-$ top-level class (in pool, no InnerClasses nesting
         // evidence): the $ is part of the SOURCE name (jextract-generated
         // errno_h$shared) — never dot it into a nested qualifier. Same rule
@@ -3026,7 +3063,30 @@ impl<'a> Printer<'a> {
 
 fn inner_simple(cls: &str) -> String {
     let last = cls.rsplit('/').next().unwrap_or(cls);
-    last.rsplit('$').next().unwrap_or(last).to_string()
+    let last = last.rsplit('$').next().unwrap_or(last);
+    // Obfuscators name classes after keywords (`v10.new do("")`): the
+    // qualified-new form prints this simple name raw.
+    let name = last.to_string();
+    if is_java_keyword(name.as_str())
+        || name.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        format!("_{name}")
+    } else if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
+        name
+    } else {
+        name.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
 }
 
 fn push_char_lit(out: &mut String, n: i32) {
@@ -3117,7 +3177,7 @@ pub fn is_java_keyword(name: &str) -> bool {
 
 /// `this` in its Raw encoding (prints as `this`; see the Raw arm).
 fn is_this_expr(e: &Expr) -> bool {
-    matches!(e, Expr::Raw(t) if t == "\u{3}")
+    matches!(e, Expr::This) || matches!(e, Expr::Raw(t) if t == "\u{3}" || t == "this")
 }
 
 /// Class-file names may contain characters Java source identifiers
@@ -3137,31 +3197,52 @@ fn is_statement_expr(e: &Expr) -> bool {
 }
 
 pub fn sanitize_source_name(name: &str) -> String {
-    // Obfuscators emit classes named `if`/`do`: the last segment maps to
-    // `_<seg>` exactly like ddc's declaration/keyword sites.
-    let last = name.rsplit(['.', '$']).next().unwrap_or(name);
-    let kw = is_java_keyword(last);
-    let base = if name
+    // Obfuscators emit classes named `if`/`do`, PACKAGES named `do`
+    // (weixin `package do;`) and `..badge.new..` paths (qq), and
+    // WhatsApp nests digit-start simple names under one-letter packages
+    // (`X/0Xx`). EVERY `.`-segment that cannot START a Java identifier
+    // maps to `_<seg>`; `$`-attached tails (`RequestId$1`, `X$0Xx`) are
+    // legal as-is once their leading segment is clean.
+    let bad_char = !name
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
-        && !kw
-    {
-        name.to_string()
-    } else if kw {
-        let head = &name[..name.len() - last.len()];
-        format!("{head}_{last}")
-    } else {
-        name.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect()
-    };
-    base
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.');
+    let segs: Vec<&str> = name.split('.').collect();
+    let needs = bad_char
+        || segs.iter().any(|seg| {
+            let first = seg.chars().next().unwrap_or('a');
+            is_java_keyword(seg) || first.is_ascii_digit()
+        });
+    if !needs {
+        return name.to_string();
+    }
+    segs.iter()
+        .map(|seg| {
+            let first = seg.chars().next().unwrap_or('a');
+            let fixed = if is_java_keyword(seg) || first.is_ascii_digit() {
+                format!("_{seg}")
+            } else {
+                seg.to_string()
+            };
+            if fixed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            {
+                fixed
+            } else {
+                fixed
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 pub fn escape_string(s: &str) -> String {
