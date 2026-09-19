@@ -451,7 +451,7 @@ impl<'a> Printer<'a> {
                 }
                 line.push_str(&self.type_name(&info.ty));
                 line.push(' ');
-                line.push_str(&info.name);
+                line.push_str(&java_ident(&info.name));
                 if let Some(e) = init {
                     line.push_str(" = ");
                     // A lambda initializing a generically-typed SAM local:
@@ -598,7 +598,7 @@ impl<'a> Printer<'a> {
                 let mut head = String::from("for (");
                 head.push_str(&self.type_name(&info.ty));
                 head.push(' ');
-                head.push_str(&info.name);
+                head.push_str(&java_ident(&info.name));
                 head.push_str(" : ");
                 self.expr(iterable, 1, &mut head);
                 head.push(')');
@@ -758,7 +758,7 @@ impl<'a> Printer<'a> {
                         let mut t = String::new();
                         t.push_str(&self.type_name(&info.ty));
                         t.push(' ');
-                        t.push_str(&info.name);
+                        t.push_str(&java_ident(&info.name));
                         if let Some(e) = init {
                             t.push_str(" = ");
                             self.expr(e, 1, &mut t);
@@ -971,7 +971,7 @@ impl<'a> Printer<'a> {
                 let info = self.vt.var(*var);
                 out.push_str(&self.type_name(&info.ty));
                 out.push(' ');
-                out.push_str(&info.name);
+                out.push_str(&java_ident(&info.name));
                 if let Some(e) = init {
                     out.push_str(" = ");
                     let mut p = self.sub();
@@ -1021,7 +1021,14 @@ impl<'a> Printer<'a> {
             Expr::RawT(t, _) => out.push_str(t),
             Expr::Local { var, .. } => {
                 let info = self.vt.var(*var);
-                out.push_str(&info.name);
+                // The receiver var carries the dex debug name "this" —
+                // reads render as the keyword (legal in expression
+                // position, and it is never declared).
+                if info.name == "this" {
+                    out.push_str("this");
+                } else {
+                    out.push_str(&java_ident(&info.name));
+                }
             }
             Expr::This => out.push_str("this"),
             Expr::New { cls, args, ty, .. } => {
@@ -1664,6 +1671,15 @@ impl<'a> Printer<'a> {
                         out.push('<');
                         out.push_str(&type_args.join(", "));
                         out.push('>');
+                    }
+                    // A BARE `yield(...)` invocation trips Java 13's
+                    // restricted identifier (Kotlin suspend funs name
+                    // their continuation entry `yield`; news_article
+                    // ships CoroutineExtKt$yield). Qualified calls are
+                    // fine — when no receiver was printed, add one.
+                    if name == "yield" && !out.ends_with('.') && !out.ends_with('>') {
+                        out.push_str(&self.shorten(cls));
+                        out.push('.');
                     }
                     out.push_str(&java_ident(name));
                     out.push('(');
@@ -3063,11 +3079,16 @@ impl<'a> Printer<'a> {
 
 fn inner_simple(cls: &str) -> String {
     let last = cls.rsplit('/').next().unwrap_or(cls);
-    let last = last.rsplit('$').next().unwrap_or(last);
+    // R8 leaves class names ending in `$` (rimet's `ThreadMsg$$$`):
+    // the last `$`-segment is EMPTY — fall back to the whole simple
+    // name instead of printing `receiver.new (args)`.
+    let seg = last.rsplit('$').next().unwrap_or(last);
+    let last = if seg.is_empty() { last } else { seg };
     // Obfuscators name classes after keywords (`v10.new do("")`): the
     // qualified-new form prints this simple name raw.
     let name = last.to_string();
     if is_java_keyword(name.as_str())
+        || is_restricted_type_name(name.as_str())
         || name.chars().next().is_some_and(|c| c.is_ascii_digit())
     {
         format!("_{name}")
@@ -3077,7 +3098,10 @@ fn inner_simple(cls: &str) -> String {
     {
         name
     } else {
-        name.chars()
+        // Non-ASCII single chars (Alipay names a field `支`) map to a
+        // lone `_` — itself reserved since Java 9. Escape it.
+        let mapped: String = name
+            .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
                     c
@@ -3085,7 +3109,12 @@ fn inner_simple(cls: &str) -> String {
                     '_'
                 }
             })
-            .collect()
+            .collect();
+        if mapped == "_" {
+            "__".to_string()
+        } else {
+            mapped
+        }
     }
 }
 
@@ -3141,12 +3170,18 @@ pub fn java_ident(name: &str) -> String {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
     let keyword = is_java_keyword(name);
-    if clean && !keyword {
+    // A simple name may not START with a digit either (nova names fields
+    // `1x`/`2x`/`3x`): ddc's declaration side has the same branch.
+    let digit_start = name.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if clean && !keyword && !digit_start {
         name.to_string()
-    } else if keyword {
+    } else if keyword || digit_start {
         format!("_{name}")
     } else {
-        name.chars()
+        // Non-ASCII single chars (Alipay names a field `支`) map to a
+        // lone `_` — itself reserved since Java 9. Escape it.
+        let mapped: String = name
+            .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
                     c
@@ -3154,14 +3189,25 @@ pub fn java_ident(name: &str) -> String {
                     '_'
                 }
             })
-            .collect()
+            .collect();
+        if mapped == "_" {
+            "__".to_string()
+        } else {
+            mapped
+        }
     }
 }
 
-/// Java reserved words (plus the null/true/false literals): Kotlin emits
-/// methods and fields named `default` (Companion.default()) — no Java
-/// program can name them, so both ddc's declarations and these call
-/// sites map them to `_<name>` identically.
+/// Java reserved words (plus the null/true/false literals, and `_` — a
+/// reserved IDENTIFIER since Java 9: Alipay's instant-run patch system
+/// names fields `_`, and `javac` rejects it with "underscores are not
+/// allowed here"): Kotlin emits methods and fields named `default`
+/// (Companion.default()) — no Java program can name them, so both ddc's
+/// declarations and these call sites map them to `_<name>` identically
+/// (which turns `_` into `__`). NOTE: these are MEMBER-level escapes —
+/// locals/fields/params MAY legally carry the restricted contextual
+/// type names below (rt.jar has `var` locals), so those live in their
+/// own predicate.
 pub fn is_java_keyword(name: &str) -> bool {
     matches!(
         name,
@@ -3172,6 +3218,19 @@ pub fn is_java_keyword(name: &str) -> bool {
             | "package" | "private" | "protected" | "public" | "return" | "short" | "static"
             | "strictfp" | "super" | "switch" | "synchronized" | "this" | "throw" | "throws"
             | "transient" | "try" | "void" | "volatile" | "while" | "true" | "false" | "null"
+            | "_"
+    )
+}
+
+/// Restricted CONTEXTUAL type names — javac rejects them in TYPE
+/// declarations and type references (`'var' 是受限类型名称`), but they
+/// stay legal as member/local names (rt.jar compiles `var` locals).
+/// Consulted ONLY where a CLASS name renders: type declarations,
+/// segment sanitizers, the qualified-new simple name.
+pub fn is_restricted_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "var" | "yield" | "record" | "sealed" | "permits"
     )
 }
 
@@ -3210,7 +3269,7 @@ pub fn sanitize_source_name(name: &str) -> String {
     let needs = bad_char
         || segs.iter().any(|seg| {
             let first = seg.chars().next().unwrap_or('a');
-            is_java_keyword(seg) || first.is_ascii_digit()
+            is_java_keyword(seg) || is_restricted_type_name(seg) || first.is_ascii_digit()
         });
     if !needs {
         return name.to_string();
@@ -3218,7 +3277,7 @@ pub fn sanitize_source_name(name: &str) -> String {
     segs.iter()
         .map(|seg| {
             let first = seg.chars().next().unwrap_or('a');
-            let fixed = if is_java_keyword(seg) || first.is_ascii_digit() {
+            let fixed = if is_java_keyword(seg) || is_restricted_type_name(seg) || first.is_ascii_digit() {
                 format!("_{seg}")
             } else {
                 seg.to_string()
@@ -3229,7 +3288,9 @@ pub fn sanitize_source_name(name: &str) -> String {
             {
                 fixed
             } else {
-                fixed
+                // Non-ASCII single chars map to a lone `_` — reserved
+                // since Java 9. Escape it (declaration/ref consistency).
+                let mapped: String = fixed
                     .chars()
                     .map(|c| {
                         if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
@@ -3238,7 +3299,12 @@ pub fn sanitize_source_name(name: &str) -> String {
                             '_'
                         }
                     })
-                    .collect()
+                    .collect();
+                if mapped == "_" {
+                    "__".to_string()
+                } else {
+                    mapped
+                }
             }
         })
         .collect::<Vec<_>>()
