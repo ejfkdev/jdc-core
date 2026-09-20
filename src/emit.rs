@@ -2784,6 +2784,14 @@ impl<'a> Printer<'a> {
         if on.as_ref() == cls {
             return false;
         }
+        // A receiver widened to Object (Kotlin `when` materialization
+        // residue — every branch's value lowered into one slot) cannot
+        // resolve ANY member: cast to the invoke's resolved class. The
+        // bytecode guarantees the runtime type (invokevirtual dispatch
+        // on exactly this object), so the cast is always honest.
+        if on.as_ref() == "java/lang/Object" && cls != "java/lang/Object" {
+            return true;
+        }
         let want = format!(
             "({}){}",
             desc.args

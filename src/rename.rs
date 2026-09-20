@@ -16,6 +16,56 @@ use std::sync::OnceLock;
 /// walk below).
 static RENAMES: OnceLock<HashMap<String, String>> = OnceLock::new();
 static REVERSE: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Field display renames: owner → list of (name, type descriptor, display).
+/// Obfuscators rename a synthetic outer-reference field (`this$0`) to a
+/// one-char name that COLLIDES with a real field of the same class
+/// (`final a a;` beside `private Runnable a;`) — legal in bytecode (fields
+/// resolve by index), illegal in source. Every consumer of a field name —
+/// the declaration and every reference — funnels through here, so one
+/// registry keeps all sites consistent. Vec per owner: a class has a
+/// handful of collisions at most, and the borrow-based lookup avoids
+/// allocation on the (rare) collision-hit path.
+static FIELD_RENAMES: OnceLock<HashMap<std::sync::Arc<str>, Vec<FieldRename>>> = OnceLock::new();
+static FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// One renamed field of one owner class.
+pub struct FieldRename {
+    pub name: std::sync::Arc<str>,
+    pub desc: std::sync::Arc<str>,
+    pub display: std::sync::Arc<str>,
+}
+
+/// Install the field rename registry (empty map = inactive, one relaxed
+/// atomic read per lookup on clean corpora).
+pub fn set_field_renames(map: HashMap<std::sync::Arc<str>, Vec<FieldRename>>) {
+    if !map.is_empty() {
+        FIELD_ACTIVE.store(true, Ordering::Relaxed);
+    }
+    let _ = FIELD_RENAMES.set(map);
+}
+
+/// Fast probe: is the member-rename registry non-empty? Callers on hot
+/// paths (every method/field reference) skip descriptor reconstruction
+/// entirely when it is not.
+#[inline]
+pub fn member_rename_active() -> bool {
+    FIELD_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Display name for a field, when it was renamed.
+#[inline]
+pub fn field_display(owner: &str, name: &str, desc: &str) -> Option<&'static str> {
+    if !FIELD_ACTIVE.load(Ordering::Relaxed) {
+        return None;
+    }
+    FIELD_RENAMES
+        .get()?
+        .get(owner)?
+        .iter()
+        .find(|fr| &*fr.name == name && &*fr.desc == desc)
+        .map(|fr| fr.display.as_ref())
+}
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Install the map (call once, before worker threads spawn). Identity
