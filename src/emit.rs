@@ -1362,6 +1362,20 @@ impl<'a> Printer<'a> {
                         }
                         out.push_str(").");
                         out.push_str(&java_ident(name));
+                    } else if matches!(
+                        o.type_ref().erased(),
+                        crate::types::JavaType::Object(ref n) if n.as_ref() == "java/lang/Object"
+                    ) && cls != "java/lang/Object" {
+                        // Receiver widened to Object (when-materialization
+                        // residue): the field cannot resolve on Object —
+                        // cast to the declaring class, the same honest
+                        // cast the Method arm uses.
+                        out.push_str("((");
+                        out.push_str(&self.shorten(cls));
+                        out.push_str(") ");
+                        self.expr(o, 14, out);
+                        out.push_str(").");
+                        out.push_str(&java_ident(name));
                     } else {
                         self.expr(o, 15, out);
                         out.push('.');
