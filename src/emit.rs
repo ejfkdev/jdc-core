@@ -1178,6 +1178,25 @@ impl<'a> Printer<'a> {
                     let shown = if member_this {
                         // `new Inner()` from inside the outer class
                         inner_simple(cls)
+                    } else if cls
+                        .rsplit('$')
+                        .next()
+                        .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false)
+                    {
+                        // Digit-suffixed class at a `new` site: a d8/R8-
+                        // desugared lambda (`...$lambda$N$$inlined$log$1`,
+                        // `Outer$$ExternalSyntheticLambda0`) or an anonymous
+                        // class (`Outer$1`). Both are concrete, pool-rendered
+                        // classes, so print the real binary name — NOT the
+                        // abstract SAM interface `shorten` falls back to
+                        // (which yields an invalid `new Iface(..)`: "a是抽象
+                        // 的; 无法实例化", the biggest abstract-instantiation
+                        // family on Kotlin corpora, v6.a/l/p = Function0/1/2).
+                        // Type positions keep `shorten` (interface), so the
+                        // declaration stays phi-compatible across branches
+                        // that mint different lambdas: `Iface v = new C(..)`.
+                        self.shorten_concrete(cls)
                     } else {
                         self.shorten(cls)
                     };
@@ -2863,10 +2882,21 @@ impl<'a> Printer<'a> {
         // Class-file names may contain characters Java cannot parse
         // (R8 desugared `Collection$-EL`) — EVERY return path runs the
         // deterministic sanitizer (early returns bypassed it).
-        sanitize_source_name(&self.shorten_inner(internal))
+        sanitize_source_name(&self.shorten_inner(internal, true))
     }
 
-    fn shorten_inner(&self, internal: &str) -> String {
+    /// Like `shorten` but WITHOUT the anonymous-class → interface/super
+    /// fallback: used at `new <cls>` sites so a d8/R8-desugared lambda
+    /// class (which ends in `$<digits>` like an anonymous class) prints as
+    /// its concrete, instantiable binary name instead of its abstract SAM
+    /// interface. Type positions keep using `shorten` (interface), so the
+    /// declaration and the constructor disagree in the correct direction:
+    /// `Function0 v = new Outer$..$log$1(..)`.
+    pub fn shorten_concrete(&self, internal: &str) -> String {
+        sanitize_source_name(&self.shorten_inner(internal, false))
+    }
+
+    fn shorten_inner(&self, internal: &str, anon_fallback: bool) -> String {
         if internal.is_empty() {
             return String::new();
         }
@@ -2904,19 +2934,30 @@ impl<'a> Printer<'a> {
             || dollar_in_pkg
             || (internal.contains('$') && !dot_safe(&simple_here));
         // Anonymous class types (all-digit last segment) have no source
-        // name: print the base interface/superclass instead.
-        if let Some(last) = internal.rsplit('$').next() {
-            if !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
-                if let Some((ifaces, sup)) = self.ctx.class_bases(internal) {
-                    if let Some(n) = ifaces.first() {
-                        return self.shorten(n);
-                    }
-                    if let Some(sup) = sup {
-                        if sup != "java/lang/Object" {
-                            return self.shorten(&sup);
+        // name: print the base interface/superclass instead. Skipped for
+        // `new <cls>` sites (anon_fallback=false): a d8/R8-desugared
+        // LAMBDA class also ends in `$<digits>` (`...$lambda$N$$inlined
+        // $log$1`, `Outer$$ExternalSyntheticLambda0`) but IS a concrete,
+        // pool-rendered class — printing its SAM interface there yields an
+        // invalid `new Iface(..)` ("a是抽象的; 无法实例化", the biggest
+        // abstract-instantiation family on Kotlin corpora: v6.a/l/p =
+        // Function0/1/2). The var/phi TYPE positions keep the interface
+        // (shorten with fallback), so `Iface v = new ConcreteLambda(..)`
+        // stays phi-compatible across branches that mint different lambdas.
+        if anon_fallback {
+            if let Some(last) = internal.rsplit('$').next() {
+                if !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
+                    if let Some((ifaces, sup)) = self.ctx.class_bases(internal) {
+                        if let Some(n) = ifaces.first() {
+                            return self.shorten(n);
                         }
+                        if let Some(sup) = sup {
+                            if sup != "java/lang/Object" {
+                                return self.shorten(&sup);
+                            }
+                        }
+                        return "Object".to_string();
                     }
-                    return "Object".to_string();
                 }
             }
         }
