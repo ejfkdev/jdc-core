@@ -7,7 +7,7 @@
 //! * classify loops into while / do-while / infinite forms,
 //! * assemble try/catch with exception parameter variables.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cfg::Cfg;
 use crate::ir::build::{BlockResult, Term};
@@ -49,9 +49,9 @@ struct SwitchCtx {
 pub struct Converter<'a> {
     pub cfg: &'a Cfg,
     pub results: &'a Vec<BlockResult>,
-    pub groups: Vec<crate::structure::TryGroup>,
+    pub groups: std::borrow::Cow<'a, [crate::structure::TryGroup]>,
     /// Dominators over the full method graph (for goto fallback decisions).
-    pub dom: crate::structure::DomInfo,
+    pub dom: std::borrow::Cow<'a, crate::structure::DomInfo>,
     /// Block whose statements are currently being converted (for postdom
     /// checks in goto resolution).
     cur_block: usize,
@@ -89,7 +89,7 @@ pub struct Converter<'a> {
     /// ContinueVia re-emit b's statements after the copy).
     prev_copy: std::cell::Cell<Option<usize>>,
     /// Heads of copy-walked shared tails (from the structurer).
-    copied_tails: std::collections::HashSet<usize>,
+    copied_tails: HashSet<usize>,
     /// Collected label emissions: block target -> label name (for `Label` stmts).
     pub pending_labels: HashMap<usize, String>,
     /// Names of FINAL fields of the class being decompiled. A shared
@@ -131,7 +131,7 @@ fn strip_trailing_goto(s: &mut Stmt, follow: Option<usize>) {
 }
 
 impl<'a> Converter<'a> {
-    pub fn with_copied_tails(mut self, tails: std::collections::HashSet<usize>) -> Self {
+    pub fn with_copied_tails(mut self, tails: HashSet<usize>) -> Self {
         self.copied_tails = tails;
         self
     }
@@ -145,7 +145,7 @@ impl<'a> Converter<'a> {
     fn stmts_write_final(&self, v: &[Stmt]) -> bool {
         v.iter().any(|s| match s {
             Stmt::ExprStmt(Expr::Assign { target, .. }) => {
-                matches!(&**target, Expr::Field { name, .. } if self.final_fields.contains(name))
+                matches!(&**target, Expr::Field { name, .. } if self.final_fields.contains(name.as_ref()))
             }
             _ => false,
         })
@@ -161,7 +161,7 @@ impl<'a> Converter<'a> {
             return false;
         }
         let mut x = t;
-        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         for _ in 0..8 {
             if !seen.insert(x) {
                 return false;
@@ -185,7 +185,12 @@ impl<'a> Converter<'a> {
         let universe: HashSet<usize> = (0..cfg.blocks.len()).collect();
         let dom = crate::structure::compute_dominators(cfg, &universe, cfg.entry);
         let groups = crate::structure::group_exceptions_with(cfg, Some(results));
-        Self::from_parts(cfg, results, groups, dom)
+        Self::from_parts(
+            cfg,
+            results,
+            std::borrow::Cow::Owned(groups),
+            std::borrow::Cow::Owned(dom),
+        )
     }
 
     /// `new` with the group set and dominator tree precomputed and shared
@@ -196,14 +201,37 @@ impl<'a> Converter<'a> {
         groups: Vec<crate::structure::TryGroup>,
         dom: crate::structure::DomInfo,
     ) -> Self {
-        Self::from_parts(cfg, results, groups, dom)
+        Self::from_parts(
+            cfg,
+            results,
+            std::borrow::Cow::Owned(groups),
+            std::borrow::Cow::Owned(dom),
+        )
+    }
+
+    /// `with_precomputed` borrowing the shared groups/dominators instead
+    /// of taking clones: ddc computes both once per method and feeds the
+    /// SAME data to the Structurer and (per retry) the Converter — three
+    /// deep clones (groups twice, idom vec once) per method vanished.
+    pub fn with_precomputed_ref(
+        cfg: &'a Cfg,
+        results: &'a Vec<BlockResult>,
+        groups: &'a [crate::structure::TryGroup],
+        dom: &'a crate::structure::DomInfo,
+    ) -> Self {
+        Self::from_parts(
+            cfg,
+            results,
+            std::borrow::Cow::Borrowed(groups),
+            std::borrow::Cow::Borrowed(dom),
+        )
     }
 
     fn from_parts(
         cfg: &'a Cfg,
         results: &'a Vec<BlockResult>,
-        groups: Vec<crate::structure::TryGroup>,
-        dom: crate::structure::DomInfo,
+        groups: std::borrow::Cow<'a, [crate::structure::TryGroup]>,
+        dom: std::borrow::Cow<'a, crate::structure::DomInfo>,
     ) -> Self {
         Converter {
             cfg,
@@ -214,14 +242,14 @@ impl<'a> Converter<'a> {
             loops: Vec::new(),
             switches: Vec::new(),
             if_follows: Vec::new(),
-            used_labels: HashSet::new(),
+            used_labels: HashSet::default(),
             label_counter: 0,
             goto_is_last: false,
             expect_next: std::cell::Cell::new(None),
             prev_copy: std::cell::Cell::new(None),
-            copied_tails: std::collections::HashSet::new(),
-            pending_labels: HashMap::new(),
-            final_fields: HashSet::new(),
+            copied_tails: HashSet::default(),
+            pending_labels: HashMap::default(),
+            final_fields: HashSet::default(),
         }
     }
 
@@ -964,7 +992,7 @@ impl<'a> Converter<'a> {
     #[allow(dead_code)]
     fn postdominates(&self, a: usize, b: usize, universe: &HashSet<usize>) -> bool {
         // BFS from b avoiding a; if no exit block is reachable, a post-dominates.
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut q = std::collections::VecDeque::new();
         q.push_back(b);
         seen.insert(b);
@@ -1310,7 +1338,7 @@ fn can_reach(cfg: &Cfg, from: usize, to: usize, budget: usize) -> bool {
     if from == to {
         return true;
     }
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut q = std::collections::VecDeque::new();
     q.push_back(from);
     seen.insert(from);

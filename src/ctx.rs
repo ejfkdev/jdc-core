@@ -80,6 +80,15 @@ pub trait Ctx {
         52
     }
 
+    /// Identity of the backing container (pool), for caches keyed on
+    /// pool-dependent pure queries (`Printer::shorten` memoization).
+    /// Default 0 is safe only for single-pool processes; multi-pool
+    /// front-ends (ddc/jcdc) override with the pool pointer so a second
+    /// pool never reads the first pool's cached shortenings.
+    fn pool_id(&self) -> u64 {
+        0
+    }
+
     /// The class that `internal` is nested in, when the container records the
     /// nesting (JVM `InnerClasses`/`NestHost`; DEX inner-class annotations).
     /// `None` for a top-level class — including literal-`$` names that only

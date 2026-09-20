@@ -15,7 +15,12 @@ pub enum JavaType {
     Long,
     Double,
     /// Reference type, internal name (e.g. `java/lang/String`).
-    Object(String),
+    /// `Arc<str>`: every IR clone/drop drags JavaTypes along and the
+    /// String payload made each one an alloc + memcpy + free (a top
+    /// memmove source in corpus profiles); Arc makes clones one atomic
+    /// bump. Arc over Rc because pool-level registries shared across
+    /// worker threads must stay Sync.
+    Object(std::sync::Arc<str>),
     Array(Box<JavaType>),
 }
 
@@ -286,8 +291,11 @@ pub fn parse_type_at(b: &[u8], i: usize) -> Option<(JavaType, usize)> {
         }
         b'L' => {
             let end = b[i + 1..].iter().position(|&x| x == b';')? + i + 1;
-            let name = std::str::from_utf8(&b[i + 1..end]).ok()?.to_string();
-            Some((JavaType::Object(name), end + 1))
+            // Arc::from(&str) directly: the String detour cost a second
+            // alloc+copy on the hottest construction path (every
+            // descriptor operand of every instruction).
+            let name = std::str::from_utf8(&b[i + 1..end]).ok()?;
+            Some((JavaType::Object(std::sync::Arc::from(name)), end + 1))
         }
         _ => None,
     }

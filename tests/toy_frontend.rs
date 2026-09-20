@@ -300,7 +300,7 @@ fn bind_catches(s: &mut Stmt, vt: &mut VarTable) {
                         let slot = vt.var(v).slot;
                         let name = format!("e{}", c.var_name.as_deref().unwrap_or(""));
                         let new_var =
-                            vt.add_catch_var(slot, name, TypeRef::J(JavaType::Object(exc)));
+                            vt.add_catch_var(slot, name, TypeRef::J(JavaType::Object(exc.into())));
                         if let Stmt::Block(vs) = c.body.as_mut() {
                             vs.remove(0);
                         }
@@ -597,7 +597,7 @@ fn register_machine_try_catch() {
                 owner: None,
                 cls: "java/lang/Math".into(),
                 name: "abs".into(),
-                desc: jdc_core::types::parse_method_descriptor("(I)I").unwrap(),
+                desc: std::sync::Arc::new(jdc_core::types::parse_method_descriptor("(I)I").unwrap()),
                 args: vec![local(&vt, "n")],
                 is_static: true,
                 is_interface: false,

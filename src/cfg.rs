@@ -53,7 +53,7 @@ pub struct ExcRange {
     pub end: u32,
     pub handler: u32,
     /// `None` = catch-all (the source form is usually `finally`).
-    pub catch_type: Option<String>,
+    pub catch_type: Option<std::sync::Arc<str>>,
 }
 
 /// An edge from a protected region to its handler.
@@ -242,7 +242,7 @@ mod tests {
                 start: 0,
                 end: 6,
                 handler: 6,
-                catch_type: Some("java/lang/Throwable".into()),
+                catch_type: Some(std::sync::Arc::from("java/lang/Throwable")),
             }],
         );
         assert_eq!(cfg.blocks[1].pred, vec![0]);

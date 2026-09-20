@@ -210,7 +210,7 @@ pub fn sig_matches_base(tr: &TypeRef, base: &JavaType) -> bool {
         // class), so any reference descriptor is compatible.
         crate::types::GenericType::TypeVar(_) => matches!(base, JavaType::Object(_)),
         crate::types::GenericType::Class(cs) => {
-            matches!(base, JavaType::Object(n) if *n == cs.internal_name())
+            matches!(base, JavaType::Object(n) if n.as_ref() == cs.internal_name())
         }
         crate::types::GenericType::Primitive(c) => base.primitive_char() == Some(*c),
         crate::types::GenericType::Array(_) => matches!(base, JavaType::Array(_)),

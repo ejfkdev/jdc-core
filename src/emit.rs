@@ -107,6 +107,15 @@ impl<'a> Printer<'a> {
         self
     }
 
+    /// Printer rendering into a caller-provided buffer: the method text
+    /// (signature, braces) and the printed body land in ONE string —
+    /// ddc used to render the body separately and copy it line-by-line
+    /// into the class buffer (a full extra pass over every method).
+    pub fn with_output(mut self, out: String) -> Self {
+        self.out = out;
+        self
+    }
+
     /// Printer starting at a fixed indentation level (method bodies at 1).
     pub fn with_indent(mut self, indent: usize) -> Self {
         self.indent = indent;
@@ -1040,7 +1049,7 @@ impl<'a> Printer<'a> {
                 let explicit = match ty {
                     TypeRef::G(crate::types::GenericType::Class(cs))
                         if cs.parts.last().map(|p| !p.args.is_empty()).unwrap_or(false)
-                            && crate::typeutil::classsig_internal(cs) == *cls =>
+                            && crate::typeutil::classsig_internal(cs).as_str() == cls.as_ref() =>
                     {
                         let rendered: Vec<String> = cs
                             .parts
@@ -1186,7 +1195,7 @@ impl<'a> Printer<'a> {
                         let sam_rets: Vec<Option<TypeRef>> = match ty {
                             TypeRef::G(crate::types::GenericType::Class(cs))
                                 if explicit.is_some()
-                                    && crate::typeutil::classsig_internal(cs) == *cls =>
+                                    && crate::typeutil::classsig_internal(cs).as_str() == cls.as_ref() =>
                             {
                                 let pinned = cs.parts.last().map(|p| p.args.clone());
                                 let formals = self.ctx.ctor_formals_by_arity(cls, args.len());
@@ -1299,7 +1308,7 @@ impl<'a> Printer<'a> {
             } => {
                 // javac reserves `$assertionsDisabled`; the declaration and
                 // all references are emitted under a private alias.
-                let name: &str = if name == "$assertionsDisabled" {
+                let name: &str = if name.as_ref() == "$assertionsDisabled" {
                     crate::analysis::ASSERT_FIELD
                 } else {
                     name
@@ -1365,7 +1374,7 @@ impl<'a> Printer<'a> {
                     // `SocketImplFactory factory = factory;` self-reference
                     // — 可能尚未初始化变量factory x2 sites). Qualify with the
                     // class name to reach the field.
-                    let shadowed_by_local = cls == &self.ctx.class_name()
+                    let shadowed_by_local = cls.as_ref() == self.ctx.class_name()
                         && self.vt.vars.iter().any(|v| v.name == name);
                     // ENCLOSING-class static fields read from a nested
                     // class print bare too (lexical scope) — and MUST when
@@ -1375,13 +1384,13 @@ impl<'a> Printer<'a> {
                     // `HPKE.PSK_ID_HASH` resolves the qualifier as the
                     // byte[] FIELD (variables obscure type names in
                     // expression names) — 找不到符号 变量 PSK_ID_HASH x6.
-                    let enclosing_static = cls != &self.ctx.class_name()
+                    let enclosing_static = cls.as_ref() != self.ctx.class_name()
                         && self.ctx.class_name().starts_with(&format!("{}$", cls))
                         && !self.vt.vars.iter().any(|v| v.name == name)
                         && {
                             let mut cur = self.ctx.class_name().to_string();
                             let mut shadow = false;
-                            while cur != *cls {
+                            while cur.as_str() != cls.as_ref() {
                                 // Inherited fields shadow too (superclass
                                 // chain — see the method-side twin).
                                 let mut sup = Some(cur.clone());
@@ -1404,7 +1413,7 @@ impl<'a> Printer<'a> {
                             }
                             !shadow
                         };
-                    if !enclosing_static && (cls != &self.ctx.class_name() || shadowed_by_local) {
+                    if !enclosing_static && (cls.as_ref() != self.ctx.class_name() || shadowed_by_local) {
                         out.push_str(&self.shorten(cls));
                         out.push('.');
                     }
@@ -1445,7 +1454,7 @@ impl<'a> Printer<'a> {
                         out.push_str(") ");
                     }
                 }
-                if name == "<init>" && *is_special {
+                if name.as_ref() == "<init>" && *is_special {
                     // The ctor fold normally turns `new X; <init>` into a
                     // New expr at the LIFT. When the new-instance view was
                     // lost (crossed a merge / got materialized), the call
@@ -1465,7 +1474,7 @@ impl<'a> Printer<'a> {
                         return;
                     }
                     // super(...) / this(...)
-                    let is_super_form = *is_super || cls != &self.ctx.class_name();
+                    let is_super_form = *is_super || cls.as_ref() != self.ctx.class_name();
                     // Qualified super for a STATIC class extending an
                     // INNER superclass: javac synthesizes the enclosing
                     // instance as the ctor's first param, and the source
@@ -1610,7 +1619,7 @@ impl<'a> Printer<'a> {
                             self.expr(o, 15, out);
                             out.push('.');
                         }
-                    } else if *is_static && (cls != &self.ctx.class_name() || !type_args.is_empty())
+                    } else if *is_static && (cls.as_ref() != self.ctx.class_name() || !type_args.is_empty())
                     {
                         // A static member of an ENCLOSING class resolves
                         // through lexical scope unqualified — and the
@@ -1630,7 +1639,7 @@ impl<'a> Printer<'a> {
                             && {
                                 let mut cur = self.ctx.class_name().to_string();
                                 let mut shadow = false;
-                                while cur != *cls {
+                                while cur.as_str() != cls.as_ref() {
                                     // Inherited members shadow too: the
                                     // lexical member scope of a class
                                     // includes its whole superclass chain
@@ -1677,7 +1686,7 @@ impl<'a> Printer<'a> {
                     // their continuation entry `yield`; news_article
                     // ships CoroutineExtKt$yield). Qualified calls are
                     // fine — when no receiver was printed, add one.
-                    if name == "yield" && !out.ends_with('.') && !out.ends_with('>') {
+                    if name.as_ref() == "yield" && !out.ends_with('.') && !out.ends_with('>') {
                         out.push_str(&self.shorten(cls));
                         out.push('.');
                     }
@@ -1975,7 +1984,7 @@ impl<'a> Printer<'a> {
                 let base_internal = match base {
                     TypeRef::J(crate::types::JavaType::Object(n)) => Some(n.clone()),
                     TypeRef::G(crate::types::GenericType::Class(cs)) => {
-                        Some(crate::typeutil::classsig_internal(cs))
+                        Some(crate::typeutil::classsig_internal(cs).into())
                     }
                     _ => None,
                 };
@@ -1983,7 +1992,7 @@ impl<'a> Printer<'a> {
                 // formal must print false/true) reads the base class's own
                 // `<init>` set: front-end metadata.
                 let ctor_params = base_internal
-                    .and_then(|bi| self.ctx.ctor_param_types(bi.as_str(), 0, args.len(), args));
+                    .and_then(|bi| self.ctx.ctor_param_types(&bi, 0, args.len(), args));
                 match ctor_params {
                     Some(pt) => self.args_typed(args, &pt, out),
                     None => self.args(args, out),
@@ -2468,7 +2477,7 @@ impl<'a> Printer<'a> {
                                 // chain's inference).
                                 if let TypeRef::G(g0) = e.type_ref() {
                                     if let crate::types::GenericType::Class(cs) = &g0 {
-                                        if crate::typeutil::classsig_internal(cs) == *t {
+                                        if crate::typeutil::classsig_internal(cs).as_str() == t.as_ref() {
                                             return true;
                                         }
                                     }
@@ -2490,10 +2499,10 @@ impl<'a> Printer<'a> {
                                         continue;
                                     }
                                     for (sup, _) in ctx.class_supers_args(&cur, &[]) {
-                                        if &sup == t {
+                                        if sup.as_str() == t.as_ref() {
                                             return true;
                                         }
-                                        queue.push(sup);
+                                        queue.push(sup.into());
                                     }
                                 }
                                 false
@@ -2722,14 +2731,14 @@ impl<'a> Printer<'a> {
             return false;
         }
         let owner_ct = if matches!(o, Expr::This) {
-            self.ctx.class_name().to_string()
+            self.ctx.class_name().into()
         } else {
             match o.type_ref().erased() {
                 crate::types::JavaType::Object(n) => n,
                 _ => return false,
             }
         };
-        if owner_ct == cls {
+        if owner_ct.as_ref() == cls {
             return false;
         }
         let Some(flags) = self.ctx.field_flags(cls, name) else {
@@ -2749,7 +2758,7 @@ impl<'a> Printer<'a> {
             if sup == cls {
                 return true;
             }
-            cur = sup;
+            cur = sup.into();
         }
         false
     }
@@ -2772,7 +2781,7 @@ impl<'a> Printer<'a> {
         let crate::types::JavaType::Object(on) = o.type_ref().erased() else {
             return false;
         };
-        if on == cls {
+        if on.as_ref() == cls {
             return false;
         }
         let want = format!(
@@ -2808,7 +2817,7 @@ impl<'a> Printer<'a> {
         else {
             return false;
         };
-        if from == to || from == "java/lang/Object" || to == "java/lang/Object" {
+        if from == to || from.as_ref() == "java/lang/Object" || to.as_ref() == "java/lang/Object" {
             return false;
         }
         if !self.ctx.has_class(&from) || !self.ctx.has_class(&to) {
@@ -2824,6 +2833,11 @@ impl<'a> Printer<'a> {
     }
 
     pub fn shorten(&self, internal: &str) -> String {
+        // NOTE: deliberately NOT memoized across Printers — shorten_inner
+        // consults per-Printer state (the emitting class's package via
+        // ctx.class_name, its fields, and this method's vt.vars for the
+        // shadowed-simple-name check), so the result is not a pure
+        // function of (pool, internal).
         // Class-file names may contain characters Java cannot parse
         // (R8 desugared `Collection$-EL`) — EVERY return path runs the
         // deterministic sanitizer (early returns bypassed it).
@@ -3165,7 +3179,7 @@ fn prim_name(c: char) -> &'static str {
 /// Kotlin emits method names like `invokeSuspend$lambda-0` — `-` and any
 /// other non-identifier character is not legal Java. Deterministic
 /// mapping; ddc's classdec applies the identical rule at declarations.
-pub fn java_ident(name: &str) -> String {
+pub fn java_ident(name: &str) -> std::borrow::Cow<'_, str> {
     let clean = name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
@@ -3174,9 +3188,11 @@ pub fn java_ident(name: &str) -> String {
     // `1x`/`2x`/`3x`): ddc's declaration side has the same branch.
     let digit_start = name.chars().next().is_some_and(|c| c.is_ascii_digit());
     if clean && !keyword && !digit_start {
-        name.to_string()
+        // The overwhelmingly common case: borrow, zero allocation (this
+        // runs per rendered IDENTIFIER).
+        std::borrow::Cow::Borrowed(name)
     } else if keyword || digit_start {
-        format!("_{name}")
+        std::borrow::Cow::Owned(format!("_{name}"))
     } else {
         // Non-ASCII single chars (Alipay names a field `支`) map to a
         // lone `_` — itself reserved since Java 9. Escape it.
@@ -3191,9 +3207,9 @@ pub fn java_ident(name: &str) -> String {
             })
             .collect();
         if mapped == "_" {
-            "__".to_string()
+            std::borrow::Cow::Owned("__".to_string())
         } else {
-            mapped
+            std::borrow::Cow::Owned(mapped)
         }
     }
 }

@@ -7,7 +7,7 @@
 //! and file names then all agree.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::fx::FxHashMap as HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 /// file-level classes that were NOT renamed (they anchor the prefix
 /// walk below).
 static RENAMES: OnceLock<HashMap<String, String>> = OnceLock::new();
+static REVERSE: OnceLock<HashMap<String, String>> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Install the map (call once, before worker threads spawn). Identity
@@ -23,7 +24,25 @@ pub fn set_class_renames(map: HashMap<String, String>) {
     if !map.is_empty() {
         ACTIVE.store(true, Ordering::Relaxed);
     }
+    // Reverse index of real (non-identity) renames: a display name's
+    // `$`-prefixes must resolve for nested references (`x0$a$a2$a3` —
+    // the `x0$a$a2` prefix names no pool class, it is the display of
+    // one).
+    let rev: HashMap<String, String> = map
+        .iter()
+        .filter(|(k, v)| k != v)
+        .map(|(k, v)| (v.clone(), k.clone()))
+        .collect();
+    let _ = REVERSE.set(rev);
     let _ = RENAMES.set(map);
+}
+
+/// True when `internal` is the DISPLAY form of a renamed class (the
+/// value side of a real rename). print_class_name uses this to keep
+/// dotting through renamed nesting prefixes.
+#[inline]
+pub fn is_renamed_display(internal: &str) -> bool {
+    REVERSE.get().is_some_and(|m| m.contains_key(internal))
 }
 
 /// The display form of an internal class name. Exact file-level match

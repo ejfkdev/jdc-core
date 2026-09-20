@@ -61,7 +61,7 @@ pub fn generic_to_erased(g: &GenericType) -> JavaType {
             'D' => JavaType::Double,
             _ => JavaType::Void,
         },
-        GenericType::Class(cs) => JavaType::Object(cs.internal_name()),
+        GenericType::Class(cs) => JavaType::Object(cs.internal_name().into()),
         GenericType::Array(inner) => JavaType::Array(Box::new(generic_to_erased(inner))),
         GenericType::TypeVar(_) => JavaType::Object("java/lang/Object".into()),
         GenericType::Wildcard(_) => JavaType::Object("java/lang/Object".into()),
@@ -81,7 +81,7 @@ pub enum ConstVal {
     Long(i64),
     Float(f32),
     Double(f64),
-    Str(String),
+    Str(std::sync::Arc<str>),
     /// `null` literal.
     Null,
     /// Unloaded class constant resolved to a class literal or `X.class`.
@@ -285,7 +285,7 @@ pub struct LambdaExpr {
 /// Resolved static bootstrap-method argument.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BsmArg {
-    Str(String),
+    Str(std::sync::Arc<str>),
     Cls(String),
     /// Integer-valued constant label (Java 21+ typeSwitch constant
     /// patterns: `case 1:`, char constants arrive as their code point).
@@ -312,7 +312,7 @@ pub enum Expr {
     This,
     /// `new T(args)` (constructor call folded with New when possible).
     New {
-        cls: String,
+        cls: std::sync::Arc<str>,
         ty: TypeRef,
         args: Vec<Expr>,
         /// true if this is a raw `new` whose `<init>` hasn't been folded yet.
@@ -337,16 +337,23 @@ pub enum Expr {
         /// None = `this` (instance field of current class) or static import-style.
         owner: Option<Box<Expr>>,
         /// Declaring class internal name.
-        cls: String,
-        name: String,
+        ///
+        /// String payloads are `Arc<str>`: Expr is the most-cloned node
+        /// in the whole pipeline (block materialization, copy-walks,
+        /// forwarding) and every clone used to allocate fresh copies of
+        /// the class/method names. Front-ends back these with the dex/
+        /// constant-pool string tables, so construction is a refcount
+        /// bump and clones never allocate.
+        cls: std::sync::Arc<str>,
+        name: std::sync::Arc<str>,
         ty: TypeRef,
         is_static: bool,
     },
     Method {
         owner: Option<Box<Expr>>,
-        cls: String,
-        name: String,
-        desc: MethodDescriptor,
+        cls: std::sync::Arc<str>,
+        name: std::sync::Arc<str>,
+        desc: std::sync::Arc<MethodDescriptor>,
         args: Vec<Expr>,
         is_static: bool,
         is_interface: bool,
@@ -515,7 +522,7 @@ impl Expr {
             Expr::Lambda(_) => JavaType::Object("java/lang/Object".into()).into(),
             Expr::Raw(_) => JavaType::Object("java/lang/Object".into()).into(),
             Expr::RawT(_, ty) => ty.clone(),
-            Expr::AnonNew { cls, .. } => JavaType::Object(cls.clone()).into(),
+            Expr::AnonNew { cls, .. } => JavaType::Object(cls.as_str().into()).into(),
             Expr::StringConcat(_) => JavaType::Object("java/lang/String".into()).into(),
             Expr::Invokedynamic { desc, .. } => desc.ret.clone().into(),
         }

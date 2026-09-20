@@ -29,6 +29,7 @@ pub mod convert;
 pub mod ctx;
 pub mod dbg;
 pub mod emit;
+pub mod fx;
 pub mod ir;
 pub mod rename;
 pub mod sese;
@@ -37,5 +38,6 @@ pub mod types;
 pub mod typeutil;
 pub mod var;
 
+pub use fx::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use ctx::{ctx_method_body, Ctx, Family, MethodBody, NestedClass, NestedKind, NullCtx};
 pub use ir::{BlockResult, Expr, Stmt, SwitchTargets, Term};

@@ -121,8 +121,8 @@ pub fn unfold_cmp(v: Expr, op_if_int: BinOp) -> (Expr, Expr, BinOp) {
 /// A machine type reference (`[`-prefixed descriptors are array types).
 pub fn class_name_to_type(name: &str) -> JavaType {
     if name.starts_with('[') {
-        crate::types::parse_field_descriptor(name).unwrap_or(JavaType::Object(name.to_string()))
+        crate::types::parse_field_descriptor(name).unwrap_or(JavaType::Object(name.into()))
     } else {
-        JavaType::Object(name.to_string())
+        JavaType::Object(name.into())
     }
 }

@@ -15,7 +15,7 @@
 //! Milestone 1: straight-line, Cond (if/else + value-diamond/ternary), natural
 //! loops. Switch/Try reuse the existing (pub(crate)) region builders next.
 
-use std::collections::{HashMap, HashSet};
+use crate::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::ir::build::Term;
 use crate::ir::expr::Expr;
@@ -86,8 +86,8 @@ impl<'a> Structurer<'a> {
         idom: &crate::structure::DomInfo,
         loop_headers: &mut HashSet<usize>,
     ) -> HashMap<usize, Vec<usize>> {
-        let mut exc_back_sources: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut exc_retry_only: HashSet<usize> = HashSet::new();
+        let mut exc_back_sources: HashMap<usize, Vec<usize>> = HashMap::default();
+        let mut exc_retry_only: HashSet<usize> = HashSet::default();
         for e in &self.cfg.exc_edges {
             if !(universe.contains(&e.from) && universe.contains(&e.to)) {
                 continue;
@@ -107,7 +107,7 @@ impl<'a> Structurer<'a> {
             // `return false` lost — 缺少返回语句). Blocks with a normal pred
             // from OUTSIDE the handler flow (shared merges) stop the
             // closure; they belong to the enclosing flow.
-            let mut hf: HashSet<usize> = HashSet::new();
+            let mut hf: HashSet<usize> = HashSet::default();
             hf.insert(c);
             {
                 let mut q: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
@@ -170,7 +170,7 @@ impl<'a> Structurer<'a> {
         let (vx, ipdom) = compute_postdominators(self.cfg, &universe);
 
         // Natural loops from back edges (h dominates u => u->h is a back edge).
-        let mut loop_headers: HashSet<usize> = HashSet::new();
+        let mut loop_headers: HashSet<usize> = HashSet::default();
         for &u in universe.iter() {
             for &s in &self.cfg.blocks[u].succ {
                 if universe.contains(&s) && s != u && idom.dominates(s, u) {
@@ -188,15 +188,15 @@ impl<'a> Structurer<'a> {
         // protected block is part of the loop too. Without this, a
         // `while(..){ try{ return }catch{ ..loop.. } }` drops the try out of
         // the loop (the SecureRandom.getInstanceStrong regression).
-        let mut exc_preds: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut exc_preds: HashMap<usize, Vec<usize>> = HashMap::default();
         for e in &self.cfg.exc_edges {
             if universe.contains(&e.from) && universe.contains(&e.to) {
                 exc_preds.entry(e.to).or_default().push(e.from);
             }
         }
-        let mut loop_members: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut loop_members: HashMap<usize, HashSet<usize>> = HashMap::default();
         for &h in loop_headers.iter() {
-            let mut members: HashSet<usize> = HashSet::new();
+            let mut members: HashSet<usize> = HashSet::default();
             members.insert(h);
             // Collect every TRUE back-edge source for h (u -> h where h
             // dominates u; without the dominance check a forward entry edge
@@ -266,12 +266,12 @@ impl<'a> Structurer<'a> {
             exc_retry_headers: exc_back_sources.keys().copied().collect(),
             loop_headers,
             loop_members,
-            consumed: HashSet::new(),
+            consumed: HashSet::default(),
             loop_stack: Vec::new(),
             top_groups,
             depth: 0,
         };
-        let r = self.sese_region(self.cfg.entry, &HashSet::new(), &mut ctx);
+        let r = self.sese_region(self.cfg.entry, &HashSet::default(), &mut ctx);
         r
     }
 
@@ -593,9 +593,9 @@ impl<'a> Structurer<'a> {
         // the start-pc contest: Pattern.sequence case 40's `goto 4` block).
         let mut cands: Vec<usize> = Vec::new();
         {
-            let mut seen: HashSet<usize> = HashSet::new();
+            let mut seen: HashSet<usize> = HashSet::default();
             let mut stack: Vec<usize> = targets.clone();
-            let mut visited: HashSet<usize> = HashSet::new();
+            let mut visited: HashSet<usize> = HashSet::default();
             while let Some(b) = stack.pop() {
                 if stop.contains(&b) || ctx.loop_stack.contains(&b) || !visited.insert(b) {
                     continue;
@@ -667,7 +667,7 @@ impl<'a> Structurer<'a> {
             // post-switch block the forward resolvers would have found.
             let mut to_header = false;
             {
-                let mut seen: HashSet<usize> = HashSet::new();
+                let mut seen: HashSet<usize> = HashSet::default();
                 let mut stack: Vec<usize> = vec![e];
                 while let Some(b) = stack.pop() {
                     if !seen.insert(b) {
@@ -802,7 +802,7 @@ impl<'a> Structurer<'a> {
         }
         let mut post = crate::structure::reachable_within(self.cfg, target, stop);
         post.remove(&target);
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         let mut stack: Vec<usize> = vec![from];
         let mut budget = 4096usize;
         while let Some(c) = stack.pop() {
@@ -869,7 +869,7 @@ impl<'a> Structurer<'a> {
         if stop.contains(&from) {
             return false;
         }
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut stack = vec![from];
         seen.insert(from);
         while let Some(c) = stack.pop() {
@@ -1041,7 +1041,7 @@ impl<'a> Structurer<'a> {
                 cl_bar.extend(members.iter().copied());
                 cl_bar.extend(ctx_loop_stack.iter().copied());
                 cl_bar.extend(ctx_loop_headers.iter().copied());
-                let mut cl: HashSet<usize> = HashSet::new();
+                let mut cl: HashSet<usize> = HashSet::default();
                 let mut cq: Vec<usize> = natural.iter().copied().collect();
                 while let Some(b) = cq.pop() {
                     if !cl.insert(b) {
@@ -1074,7 +1074,7 @@ impl<'a> Structurer<'a> {
             // 24→0→1→…→11) — barriers are the other exits, members and
             // enclosing headers.
             let orphaned = !natural.contains(&e) && {
-                let mut seen_o: HashSet<usize> = HashSet::new();
+                let mut seen_o: HashSet<usize> = HashSet::default();
                 let mut qo: Vec<usize> = natural.iter().copied().collect();
                 for x in &qo {
                     seen_o.insert(*x);
@@ -1131,7 +1131,7 @@ impl<'a> Structurer<'a> {
                 let mut bar: HashSet<usize> = barriers.clone();
                 bar.extend(natural.iter().copied());
                 bar.remove(&e);
-                let mut seen2: HashSet<usize> = HashSet::new();
+                let mut seen2: HashSet<usize> = HashSet::default();
                 let mut q2: Vec<usize> = vec![e];
                 seen2.insert(e);
                 let mut found = false;
@@ -1193,7 +1193,7 @@ impl<'a> Structurer<'a> {
             }) {
                 continue;
             }
-            let mut fresh: HashSet<usize> = HashSet::new();
+            let mut fresh: HashSet<usize> = HashSet::default();
             // The walk's stop carries the OUTER barriers too (not just
             // cstop): Goto regions targeting them resolve to
             // break/continue at conversion instead of materializing

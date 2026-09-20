@@ -14,7 +14,9 @@
 //!    - edges that leave the scope → Goto nodes (resolved to
 //!      break/continue/labels in the conversion pass).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use crate::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cfg::Cfg;
 use crate::ir::build::{BlockResult, SwitchTargets, Term};
@@ -183,7 +185,7 @@ pub(crate) fn bypass_flows_to(cfg: &Cfg, from: usize, to: usize, barred: &HashSe
     if from == to {
         return true;
     }
-    let mut seen: HashSet<usize> = HashSet::new();
+    let mut seen: HashSet<usize> = HashSet::default();
     let mut q: VecDeque<usize> = VecDeque::new();
     q.push_back(from);
     seen.insert(from);
@@ -261,7 +263,7 @@ pub fn reset_visit_stats() {
 
 /// Blocks normally reachable from `entry` without entering `stop`.
 pub fn reachable_within(cfg: &Cfg, entry: usize, stop: &HashSet<usize>) -> HashSet<usize> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     if stop.contains(&entry) {
         return seen;
     }
@@ -310,10 +312,10 @@ pub(crate) fn compute_postdominators(
     // preds).
     let mut order: Vec<usize> = Vec::new();
     {
-        let mut visited: HashSet<usize> = HashSet::new();
+        let mut visited: HashSet<usize> = HashSet::default();
         visited.insert(vx);
         let mut stack: Vec<usize> = Vec::new();
-        let mut state: HashMap<usize, usize> = HashMap::new();
+        let mut state: HashMap<usize, usize> = HashMap::default();
         let mut seeds: Vec<usize> = universe
             .iter()
             .copied()
@@ -347,11 +349,11 @@ pub(crate) fn compute_postdominators(
         order.reverse();
         order.push(vx);
     }
-    let mut rpo_num: HashMap<usize, usize> = HashMap::new();
+    let mut rpo_num: HashMap<usize, usize> = HashMap::default();
     for (i, &b) in order.iter().enumerate() {
         rpo_num.insert(b, i);
     }
-    let mut ipdom: HashMap<usize, usize> = HashMap::new();
+    let mut ipdom: HashMap<usize, usize> = HashMap::default();
     ipdom.insert(vx, vx);
     for &b in universe.iter() {
         ipdom.insert(b, vx);
@@ -430,7 +432,7 @@ pub fn immediate_postdom(
     // paths that loop back through it do not constitute reconvergence.
     let mut dists: Vec<HashMap<usize, u32>> = Vec::with_capacity(succs.len());
     for &s0 in &succs {
-        let mut d: HashMap<usize, u32> = HashMap::new();
+        let mut d: HashMap<usize, u32> = HashMap::default();
         let mut q: VecDeque<(usize, u32)> = VecDeque::new();
         d.insert(s0, 0);
         q.push_back((s0, 0));
@@ -541,7 +543,7 @@ pub fn immediate_postdom(
             // (jdk26 IndicConjunctBreak isExtend: 1300+ rejects, each
             // re-routed follow re-walked the 4K-bytecode chain — the
             // structurer spun at 100% CPU).
-            let mut cand_reach: HashSet<usize> = HashSet::new();
+            let mut cand_reach: HashSet<usize> = HashSet::default();
             if !crate::dbg_flag!("JCDC_DBG_NOWIDE") {
                 let mut q: VecDeque<(usize, u32)> = VecDeque::new();
                 for &sx in &cfg.blocks[cand].succ {
@@ -567,7 +569,7 @@ pub fn immediate_postdom(
                 && !same_body
                 && !group_owned.contains(&cand)
                 && succs.iter().any(|&s0| {
-                    let mut seen: HashSet<usize> = HashSet::new();
+                    let mut seen: HashSet<usize> = HashSet::default();
                     let mut q: VecDeque<(usize, bool)> = VecDeque::new();
                     q.push_back((s0, false));
                     seen.insert(s0);
@@ -662,7 +664,7 @@ pub fn immediate_postdom(
                     // the skipping arms exit via their own returns.
                     && !final_writers.contains(&cand)
                     && succs.iter().any(|&s0| {
-                        let mut seen: HashSet<usize> = HashSet::new();
+                        let mut seen: HashSet<usize> = HashSet::default();
                         let mut q: VecDeque<usize> = VecDeque::new();
                         q.push_back(s0);
                         seen.insert(s0);
@@ -800,7 +802,7 @@ pub fn immediate_postdom(
     {
         let mut dists2: Vec<HashMap<usize, u32>> = Vec::with_capacity(succs.len());
         for (i, &s0) in succs.iter().enumerate() {
-            let mut d: HashMap<usize, u32> = HashMap::new();
+            let mut d: HashMap<usize, u32> = HashMap::default();
             let mut q: VecDeque<(usize, u32)> = VecDeque::new();
             d.insert(s0, 0);
             q.push_back((s0, 0));
@@ -878,7 +880,7 @@ pub struct TryGroup {
     pub start: u32,
     pub end: u32,
     /// (handler pc, catch type) in exception-table order.
-    pub handlers: Vec<(u32, Option<String>)>,
+    pub handlers: Vec<(u32, Option<std::sync::Arc<str>>)>,
     pub ranges: Vec<usize>,
 }
 
@@ -896,7 +898,7 @@ fn stmts_mention_addsuppressed(stmts: &[crate::ir::stmt::Stmt]) -> bool {
             E::Method {
                 name, owner, args, ..
             } => {
-                name == "addSuppressed"
+                name.as_ref() == "addSuppressed"
                     || owner.as_deref().map(ex).unwrap_or(false)
                     || args.iter().any(ex)
             }
@@ -991,14 +993,17 @@ pub fn group_exceptions_with(
     results: Option<&Vec<crate::ir::build::BlockResult>>,
 ) -> Vec<TryGroup> {
     let mut groups: Vec<TryGroup> = Vec::new();
+    // (start,end) → group index: the previous linear `find` per range was
+    // a top self-time hotspot on weixin (coroutine/TWR monsters carry
+    // hundreds of exception ranges — quadratic grouping).
+    let mut index: crate::fx::FxHashMap<(u32, u32), usize> = crate::fx::FxHashMap::default();
     for (ri, r) in cfg.exc_ranges.iter().enumerate() {
-        if let Some(g) = groups
-            .iter_mut()
-            .find(|g| g.start == r.start && g.end == r.end)
-        {
+        if let Some(&gi) = index.get(&(r.start, r.end)) {
+            let g = &mut groups[gi];
             g.handlers.push((r.handler, r.catch_type.clone()));
             g.ranges.push(ri);
         } else {
+            index.insert((r.start, r.end), groups.len());
             groups.push(TryGroup {
                 start: r.start,
                 end: r.end,
@@ -1013,23 +1018,85 @@ pub fn group_exceptions_with(
     // synchronized block). Merge adjacent such spans into one group so the
     // region structures as a single try. The handler's self-protection
     // range (start == handler pc) never merges into its own group.
-    fn handler_key(g: &TryGroup) -> Vec<(u32, Option<String>)> {
-        let mut v: Vec<(u32, Option<String>)> =
+    fn handler_key(g: &TryGroup) -> Vec<(u32, Option<std::sync::Arc<str>>)> {
+        let mut v: Vec<(u32, Option<std::sync::Arc<str>>)> =
             g.handlers.iter().map(|(h, t)| (*h, t.clone())).collect();
         v.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         v.dedup();
         v
     }
+    // Cached keys, parallel to `groups`: the merge loop recomputed BOTH
+    // keys for every pair on every pass — two Vec + N catch-type String
+    // allocations per comparison. A merge only joins groups with EQUAL
+    // keys, so the survivor's key survives the merge unchanged and the
+    // cache only drops the removed slot.
+    let mut keys: Vec<Vec<(u32, Option<std::sync::Arc<str>>)>> =
+        groups.iter().map(handler_key).collect();
+    // 64-bit key fingerprints: the pair loop compares ints first and only
+    // touches the (String-carrying) keys on a fingerprint match.
+    fn key_fp(k: &[(u32, Option<std::sync::Arc<str>>)]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = crate::fx::FxHasher::default();
+        k.hash(&mut h);
+        h.finish()
+    }
+    let mut key_fps: Vec<u64> = keys.iter().map(|k| key_fp(k)).collect();
+    // Only groups with IDENTICAL handler keys can merge. The flat O(G^2)
+    // pair scan re-checked unequal-key pairs pass after pass (weixin's
+    // synchronized/coroutine monsters carry hundreds of groups); bucket
+    // indices by fingerprint and only pair within a bucket. Bucket order
+    // cannot change the OUTCOME: a merge only mutates the two groups it
+    // joins (all pair checks read just the candidate pair + static cfg),
+    // and same-key conflicts always land in one bucket. Keys sorted for
+    // deterministic merge order.
+    let mut bucket_keys: Vec<u64> = {
+        let mut v: Vec<u64> = key_fps.iter().copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    // Sorted handler PCs of ALL ranges + the pc-ordered block start list:
+    // the gap checks below used to full-scan exc_ranges and blocks for
+    // EVERY candidate pair — O(G^2 * (E+B)) on weixin's synchronized
+    // monsters (hundreds of same-handler ranges). Both scans are now
+    // binary-search windows (blocks are pc-ordered: cfg.block_at already
+    // relies on it).
+    let mut all_handlers: Vec<u32> = cfg.exc_ranges.iter().map(|r| r.handler).collect();
+    all_handlers.sort_unstable();
+    all_handlers.dedup();
+    let block_starts: Vec<u32> = cfg.blocks.iter().map(|b| b.start).collect();
+    // Per-block "terminator-only purity" (no normal successors, no
+    // addSuppressed scaffolding) + a prefix count of impure instruction
+    // blocks. The gap check used to re-walk the STATEMENT TREES of every
+    // gap block for every same-key pair on every pass — the dominant
+    // remaining cost on weixin's synchronized monsters. Now the trees
+    // are walked once per method and each pair check is two binary
+    // searches + a prefix diff + a cheap end-bound scan.
+    let mut bad_prefix: Vec<u32> = Vec::with_capacity(cfg.blocks.len() + 1);
+    bad_prefix.push(0);
+    for bl in cfg.blocks.iter() {
+        let bad = bl.ins_len != 0
+            && !(bl.succ.is_empty()
+                && results
+                    .map(|rs| !stmts_mention_addsuppressed(&rs[bl.id].stmts))
+                    .unwrap_or(true));
+        bad_prefix.push(*bad_prefix.last().unwrap() + u32::from(bad));
+    }
     loop {
         let mut merged_any = false;
-        'outer: for i in 0..groups.len() {
-            for j in (i + 1)..groups.len() {
+        'outer: for bfp in &bucket_keys {
+            let members: Vec<usize> = (0..groups.len())
+                .filter(|&gi| key_fps[gi] == *bfp)
+                .collect();
+            for mi in 0..members.len() {
+                for mj in (mi + 1)..members.len() {
+                let (i, j) = (members[mi], members[mj]);
                 let (a, b) = if groups[i].start <= groups[j].start {
                     (i, j)
                 } else {
                     (j, i)
                 };
-                if handler_key(&groups[a]) != handler_key(&groups[b]) {
+                if keys[a] != keys[b] {
                     continue;
                 }
                 if groups[b].start > groups[a].end.saturating_add(4) {
@@ -1058,11 +1125,13 @@ pub fn group_exceptions_with(
                     // handler INSIDE the gap fails the same way.
                     let own_handlers: Vec<u32> =
                         groups[a].handlers.iter().map(|(h, _)| *h).collect();
-                    let seam_clear_of_foreign_handlers = !cfg.exc_ranges.iter().any(|r| {
-                        !own_handlers.contains(&r.handler)
-                            && r.handler > groups[a].end
-                            && r.handler <= groups[b].start
-                    });
+                    let h_lo =
+                        all_handlers.partition_point(|&h| h <= groups[a].end);
+                    let h_hi =
+                        all_handlers.partition_point(|&h| h <= groups[b].start);
+                    let seam_clear_of_foreign_handlers = !all_handlers[h_lo..h_hi]
+                        .iter()
+                        .any(|h| !own_handlers.contains(h));
                     // The gap blocks themselves must be pure terminator
                     // flow (the handler's inline finally copies —
                     // `unlock; return false`) with no TWR close
@@ -1070,17 +1139,22 @@ pub fn group_exceptions_with(
                     // copies whose removal from the exception topology
                     // misplaces the closes).
                     let gap_terminator_only = seam_clear_of_foreign_handlers
-                        && cfg
-                            .blocks
-                            .iter()
-                            .filter(|bl| bl.ins_len != 0)
-                            .filter(|bl| bl.start >= groups[a].end && bl.end <= groups[b].start)
-                            .all(|bl| {
-                                bl.succ.is_empty()
-                                    && results
-                                        .map(|rs| !stmts_mention_addsuppressed(&rs[bl.id].stmts))
-                                        .unwrap_or(true)
-                            });
+                        && {
+                            let from = block_starts
+                                .partition_point(|&st| st < groups[a].end);
+                            let to = block_starts
+                                .partition_point(|&st| st < groups[b].start);
+                            // No impure instruction block anywhere in the
+                            // gap …
+                            bad_prefix[to] == bad_prefix[from]
+                                // … and none of them reaches past the far
+                                // edge (the original end <= b.start bound;
+                                // only integer compares now).
+                                && cfg.blocks[from..to]
+                                    .iter()
+                                    .filter(|bl| bl.ins_len != 0)
+                                    .all(|bl| bl.end <= groups[b].start)
+                        };
                     if !gap_terminator_only {
                         continue;
                     }
@@ -1100,13 +1174,20 @@ pub fn group_exceptions_with(
                 groups[a].end = new_end;
                 groups[a].ranges = ranges;
                 groups.remove(b);
+                keys.remove(b);
+                key_fps.remove(b);
                 merged_any = true;
                 break 'outer;
+                }
             }
         }
         if !merged_any {
             break;
         }
+        // Indices shifted by the remove: rebuild the fingerprint list
+        // (bucket KEYS themselves are merge-invariant — equal keys stay
+        // equal — so only membership is recomputed by the filter above).
+        bucket_keys.sort_unstable();
     }
     // HANDLER-PROTECTION NESTING: when one group's HANDLER code is itself
     // protected by a SUBSET of that group's handlers, javac has split the
@@ -1122,80 +1203,103 @@ pub fn group_exceptions_with(
     // INNER=(A.start, A.end)[A's handlers minus B's].
     loop {
         let mut did = false;
+        // Y must start AT one of X's handler pcs — index groups by start
+        // pc instead of the flat O(G^2) scan (candidate order preserved:
+        // ascending j, exactly like the old inner loop).
+        let mut by_start: crate::fx::FxHashMap<u32, Vec<usize>> =
+            crate::fx::FxHashMap::default();
+        for (gi, g) in groups.iter().enumerate() {
+            by_start.entry(g.start).or_default().push(gi);
+        }
         'hp: for i in 0..groups.len() {
-            for j in 0..groups.len() {
+            let mut cand: Vec<usize> = Vec::new();
+            for (h, _) in &groups[i].handlers {
+                if let Some(js) = by_start.get(h) {
+                    cand.extend(js.iter().copied());
+                }
+            }
+            cand.sort_unstable();
+            cand.dedup();
+            for j in cand {
                 if i == j {
                     continue;
                 }
-                let x = groups[i].clone();
-                let y = groups[j].clone();
-                // Y must start AT one of X's handler pcs (Y protects X's
-                // handler code) and extend strictly past X.
-                if !x.handlers.iter().any(|(h, _)| *h == y.start) {
-                    continue;
-                }
-                if y.start < x.end || y.start > x.end.saturating_add(8) {
-                    continue;
-                }
-                if y.end <= x.end {
-                    continue;
-                }
-                // Y's handler set is a strict subset of X's (the shared
-                // outer catches); X keeps at least one inner-only handler.
-                if !y.handlers.iter().all(|h| x.handlers.contains(h)) {
-                    continue;
-                }
-                // Y's handlers must ALL be typed catches: a catch-all
-                // (None = java.lang.Throwable) protecting X's handler
-                // code is javac's FINALLY desugaring (the catch body's
-                // inline finally copy), not a source-level outer try —
-                // merging there hoists the finally above the catch and
-                // swallows the loop tail (feat Exceptions.loopTry: the
-                // `++i` increment vanished inside the merged topology —
-                // infinite loop, run timeout ×6 releases). KDF's outer
-                // IAPE/NSAE catches are typed; finally copies never are.
-                if !y.handlers.iter().all(|(_, t)| t.is_some()) {
-                    continue;
-                }
-                let inner_handlers: Vec<(u32, Option<String>)> = x
-                    .handlers
-                    .iter()
-                    .filter(|h| !y.handlers.contains(h))
-                    .cloned()
-                    .collect();
-                if inner_handlers.is_empty() {
-                    continue;
-                }
-                // Split X's exc-range indices: ranges whose handler is
-                // inner-only belong to INNER, the rest to OUTER.
-                let mut inner_ranges = Vec::new();
-                let mut outer_ranges: Vec<usize> = y.ranges.clone();
-                for &ri in x.ranges.iter() {
-                    let h = cfg.exc_ranges[ri].handler;
-                    let t = &cfg.exc_ranges[ri].catch_type;
-                    if y.handlers.iter().any(|(yh, yt)| *yh == h && *yt == *t) {
-                        outer_ranges.push(ri);
-                    } else {
-                        inner_ranges.push(ri);
+                // All checks run on BORROWS: the previous shape cloned
+                // both TryGroups (catch-type Strings and all) before the
+                // cheap predicates — O(n^2) full clones per pass. The
+                // owned pair is built only once every check passed.
+                let (outer, inner) = {
+                    let x = &groups[i];
+                    let y = &groups[j];
+                    // Y must start AT one of X's handler pcs (Y protects X's
+                    // handler code) and extend strictly past X.
+                    if !x.handlers.iter().any(|(h, _)| *h == y.start) {
+                        continue;
                     }
-                }
-                // No foreign handler may live strictly inside the inner
-                // span (it would belong to a deeper nest the walk must
-                // keep owning) or inside the protection gap.
-                let foreign_inside = cfg.exc_ranges.iter().any(|r| {
-                    let owned_by_x_or_y = x.handlers.iter().any(|(h, _)| *h == r.handler)
-                        || y.handlers.iter().any(|(h, _)| *h == r.handler);
-                    !owned_by_x_or_y && r.start >= x.start && r.end <= y.end
-                });
-                if foreign_inside {
-                    continue;
-                }
-                let mut outer = y.clone();
-                outer.start = x.start;
-                outer.ranges = outer_ranges;
-                let mut inner = x.clone();
-                inner.handlers = inner_handlers;
-                inner.ranges = inner_ranges;
+                    if y.start < x.end || y.start > x.end.saturating_add(8) {
+                        continue;
+                    }
+                    if y.end <= x.end {
+                        continue;
+                    }
+                    // Y's handler set is a strict subset of X's (the shared
+                    // outer catches); X keeps at least one inner-only handler.
+                    if !y.handlers.iter().all(|h| x.handlers.contains(h)) {
+                        continue;
+                    }
+                    // Y's handlers must ALL be typed catches: a catch-all
+                    // (None = java.lang.Throwable) protecting X's handler
+                    // code is javac's FINALLY desugaring (the catch body's
+                    // inline finally copy), not a source-level outer try —
+                    // merging there hoists the finally above the catch and
+                    // swallows the loop tail (feat Exceptions.loopTry: the
+                    // `++i` increment vanished inside the merged topology —
+                    // infinite loop, run timeout ×6 releases). KDF's outer
+                    // IAPE/NSAE catches are typed; finally copies never are.
+                    if !y.handlers.iter().all(|(_, t)| t.is_some()) {
+                        continue;
+                    }
+                    let inner_handlers: Vec<(u32, Option<std::sync::Arc<str>>)> = x
+                        .handlers
+                        .iter()
+                        .filter(|h| !y.handlers.contains(h))
+                        .cloned()
+                        .collect();
+                    if inner_handlers.is_empty() {
+                        continue;
+                    }
+                    // Split X's exc-range indices: ranges whose handler is
+                    // inner-only belong to INNER, the rest to OUTER.
+                    let mut inner_ranges = Vec::new();
+                    let mut outer_ranges: Vec<usize> = y.ranges.clone();
+                    for &ri in x.ranges.iter() {
+                        let h = cfg.exc_ranges[ri].handler;
+                        let t = &cfg.exc_ranges[ri].catch_type;
+                        if y.handlers.iter().any(|(yh, yt)| *yh == h && *yt == *t) {
+                            outer_ranges.push(ri);
+                        } else {
+                            inner_ranges.push(ri);
+                        }
+                    }
+                    // No foreign handler may live strictly inside the inner
+                    // span (it would belong to a deeper nest the walk must
+                    // keep owning) or inside the protection gap.
+                    let foreign_inside = cfg.exc_ranges.iter().any(|r| {
+                        let owned_by_x_or_y = x.handlers.iter().any(|(h, _)| *h == r.handler)
+                            || y.handlers.iter().any(|(h, _)| *h == r.handler);
+                        !owned_by_x_or_y && r.start >= x.start && r.end <= y.end
+                    });
+                    if foreign_inside {
+                        continue;
+                    }
+                    let mut outer = y.clone();
+                    outer.start = x.start;
+                    outer.ranges = outer_ranges;
+                    let mut inner = x.clone();
+                    inner.handlers = inner_handlers;
+                    inner.ranges = inner_ranges;
+                    (outer, inner)
+                };
                 let lo = i.min(j);
                 let hi = i.max(j);
                 groups.remove(hi);
@@ -1255,7 +1359,7 @@ pub enum Region {
         group_idx: usize,
         body: Box<Region>,
         /// (catch types [multi-catch merged], handler block, region) in table order
-        catches: Vec<(Vec<String>, usize, Box<Region>)>,
+        catches: Vec<(Vec<std::sync::Arc<str>>, usize, Box<Region>)>,
     },
     /// Jump to a block outside the current region (resolved later).
     Goto {
@@ -1289,7 +1393,7 @@ impl Region {
     fn bypasses_exempt(
         r: &Region,
         taken: usize,
-        exempt: &std::collections::HashSet<usize>,
+        exempt: &HashSet<usize>,
     ) -> bool {
         match r {
             Region::Goto { target } => *target != taken && !exempt.contains(target),
@@ -1316,7 +1420,7 @@ impl Region {
     /// conversion — jumps that never fall through, so they are not
     /// parked-chain bypasses (completing after them would emit
     /// unreachable code).
-    fn jump_targets(r: &Region, out: &mut std::collections::HashSet<usize>) {
+    fn jump_targets(r: &Region, out: &mut HashSet<usize>) {
         match r {
             Region::Loop {
                 header,
@@ -1368,7 +1472,7 @@ pub struct Structurer<'a> {
     pub cfg: &'a Cfg,
     pub results: &'a Vec<BlockResult>,
     /// Blocks whose operand stack was folded from a pure value diamond.
-    pub diamond_merges: std::collections::HashSet<usize>,
+    pub diamond_merges: HashSet<usize>,
     /// Folded diamond regions: merge block -> (root header, absorbed blocks).
     /// When the walk reaches a root header, the whole region collapses: the
     /// absorbed blocks are claimed and the walk continues at the merge.
@@ -1405,7 +1509,7 @@ pub struct Structurer<'a> {
     /// Walk-based sub-builders consult this so a retry `goto header`
     /// keeps loop precedence and resolves to `continue` (jdk26
     /// Future.exceptionNow).
-    pub sese_loop_headers: std::collections::HashSet<usize>,
+    pub sese_loop_headers: HashSet<usize>,
     /// Subset of sese_loop_headers discovered via EXCEPTION-mediated back
     /// edges (handler-flow retry gotos). The walk loop branch trusts only
     /// this subset: normal back edges must keep failing the scoped
@@ -1413,7 +1517,7 @@ pub struct Structurer<'a> {
     /// structuring it from the inner scope degraded ThreadPoolExecutor /
     /// the blocking-queue family: int-boolean conditions, catch-less
     /// tries x6 per tree).
-    pub sese_exc_retry_headers: std::collections::HashSet<usize>,
+    pub sese_exc_retry_headers: HashSet<usize>,
     /// Current `walk` recursion depth (hang guard for pathological methods
     /// whose shared-tail / branch decomposition does not converge).
     walk_depth: usize,
@@ -1446,7 +1550,7 @@ pub struct Structurer<'a> {
     /// elision/break/continue). JCDC_COPY_BUDGET overrides; 0 disables
     /// copying entirely.
     copy_budget: std::cell::Cell<u32>,
-    pub groups: Vec<TryGroup>,
+    pub groups: std::borrow::Cow<'a, [TryGroup]>,
     /// Outermost group index owning each body block.
     pub body_group: HashMap<usize, usize>,
     /// Group index owning each handler head block.
@@ -1456,7 +1560,7 @@ pub struct Structurer<'a> {
     /// one assignment per path — jdk17 Long$LongCache clinit tail
     /// `cache = archivedCache; return;` copied into a branch =
     /// "variable cache might already have been assigned").
-    pub final_fields: std::collections::HashSet<String>,
+    pub final_fields: HashSet<String>,
     /// Groups whose structure_try is currently on the stack: the
     /// group_here fallback must not re-fire a group inside its OWN body
     /// walk (structure_try passes `nested` — which excludes the group —
@@ -1475,7 +1579,7 @@ impl<'a> Structurer<'a> {
     /// UntrustedCertificates clinit: `algorithm = getProperty` inside the
     /// try AND after it — 可能已分配变量algorithm on the blank final).
     fn strip_trailing_goto_to(&self, r: &mut Region, target: usize) {
-        self.strip_trailing_goto_chain(r, target, &mut HashSet::new())
+        self.strip_trailing_goto_chain(r, target, &mut HashSet::default())
     }
 
     fn strip_trailing_goto_chain(&self, r: &mut Region, target: usize, seen: &mut HashSet<usize>) {
@@ -1621,7 +1725,7 @@ impl<'a> Structurer<'a> {
 
     fn handler_flow_only_inner(&self, gi: usize) -> HashSet<usize> {
         let g = &self.groups[gi];
-        let mut hf: HashSet<usize> = HashSet::new();
+        let mut hf: HashSet<usize> = HashSet::default();
         let mut q: VecDeque<usize> = VecDeque::new();
         for (h, _) in &g.handlers {
             if let Some(hb) = self.cfg.block_at(*h) {
@@ -1699,7 +1803,7 @@ impl<'a> Structurer<'a> {
         // walk (structure_loop keys off sese_loop_headers). A pred-based
         // closure cannot compute this: the loop header and its body
         // preds form a cycle that never bootstraps.
-        let mut normal_reach: HashSet<usize> = HashSet::new();
+        let mut normal_reach: HashSet<usize> = HashSet::default();
         let mut q: VecDeque<usize> = VecDeque::new();
         if !self.handler_group.contains_key(&self.cfg.entry) {
             q.push_back(self.cfg.entry);
@@ -2031,12 +2135,12 @@ impl<'a> Structurer<'a> {
     pub fn with_diamonds(
         cfg: &'a Cfg,
         results: &'a Vec<BlockResult>,
-        diamond_merges: std::collections::HashSet<usize>,
+        diamond_merges: HashSet<usize>,
         fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
     ) -> Structurer<'a> {
         let groups = group_exceptions_with(cfg, Some(results));
-        let mut body_group = HashMap::new();
-        let mut handler_group = HashMap::new();
+        let mut body_group = HashMap::default();
+        let mut handler_group = HashMap::default();
         // Groups are sorted outer-first (start asc, end desc); later
         // (more nested) groups overwrite so each block maps to its
         // INNERMOST containing try body.
@@ -2056,11 +2160,17 @@ impl<'a> Structurer<'a> {
             }
         }
         // Reverse index: fold root -> merge block.
-        let mut fold_root_to_merge = HashMap::new();
+        let mut fold_root_to_merge = HashMap::default();
         for (&merge, (root, _vis)) in &fold_regions {
             fold_root_to_merge.insert(*root, merge);
         }
-        Self::from_parts(cfg, results, groups, diamond_merges, fold_regions)
+        Self::from_parts(
+            cfg,
+            results,
+            std::borrow::Cow::Owned(groups),
+            diamond_merges,
+            fold_regions,
+        )
     }
 
     /// Constructor for callers that already computed the exception groups
@@ -2071,10 +2181,36 @@ impl<'a> Structurer<'a> {
         cfg: &'a Cfg,
         results: &'a Vec<BlockResult>,
         groups: Vec<TryGroup>,
-        diamond_merges: std::collections::HashSet<usize>,
+        diamond_merges: HashSet<usize>,
         fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
     ) -> Structurer<'a> {
-        Self::from_parts(cfg, results, groups, diamond_merges, fold_regions)
+        Self::from_parts(
+            cfg,
+            results,
+            std::borrow::Cow::Owned(groups),
+            diamond_merges,
+            fold_regions,
+        )
+    }
+
+    /// `with_precomputed_groups` borrowing the shared group slice (see
+    /// `Converter::with_precomputed_ref`): ddc computes the groups once
+    /// per method and shares them between the Structurer and Converter
+    /// without per-construction clones.
+    pub fn with_shared_groups(
+        cfg: &'a Cfg,
+        results: &'a Vec<BlockResult>,
+        groups: &'a [TryGroup],
+        diamond_merges: HashSet<usize>,
+        fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
+    ) -> Structurer<'a> {
+        Self::from_parts(
+            cfg,
+            results,
+            std::borrow::Cow::Borrowed(groups),
+            diamond_merges,
+            fold_regions,
+        )
     }
 
     /// Shared constructor tail: the group-derived indexes and the walk
@@ -2083,12 +2219,12 @@ impl<'a> Structurer<'a> {
     fn from_parts(
         cfg: &'a Cfg,
         results: &'a Vec<BlockResult>,
-        groups: Vec<TryGroup>,
-        diamond_merges: std::collections::HashSet<usize>,
+        groups: std::borrow::Cow<'a, [TryGroup]>,
+        diamond_merges: HashSet<usize>,
         fold_regions: HashMap<usize, (usize, HashSet<usize>)>,
     ) -> Structurer<'a> {
-        let mut body_group = HashMap::new();
-        let mut handler_group = HashMap::new();
+        let mut body_group = HashMap::default();
+        let mut handler_group = HashMap::default();
         // Groups are sorted outer-first (start asc, end desc); later
         // (more nested) groups overwrite so each block maps to its
         // INNERMOST containing try body.
@@ -2108,7 +2244,7 @@ impl<'a> Structurer<'a> {
             }
         }
         // Reverse index: fold root -> merge block.
-        let mut fold_root_to_merge = HashMap::new();
+        let mut fold_root_to_merge = HashMap::default();
         for (&merge, (root, _vis)) in &fold_regions {
             fold_root_to_merge.insert(*root, merge);
         }
@@ -2121,12 +2257,12 @@ impl<'a> Structurer<'a> {
             diamond_merges,
             fold_regions,
             fold_root_to_merge,
-            copied_tails: HashSet::new(),
+            copied_tails: HashSet::default(),
             loops_stack: Vec::new(),
             switch_depth: 0,
             case_arm_ctx: Vec::new(),
-            sese_loop_headers: std::collections::HashSet::new(),
-            sese_exc_retry_headers: std::collections::HashSet::new(),
+            sese_loop_headers: HashSet::default(),
+            sese_exc_retry_headers: HashSet::default(),
             walk_depth: 0,
             walk_visits_left: std::cell::Cell::new(
                 WALK_VISIT_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX),
@@ -2138,7 +2274,7 @@ impl<'a> Structurer<'a> {
                     .or_else(|| crate::dbg_value!("JCDC_COPY_BUDGET", u32))
                     .unwrap_or(512),
             ),
-            final_fields: HashSet::new(),
+            final_fields: HashSet::default(),
             postdom_ctx: std::cell::OnceCell::new(),
             structuring_groups: std::cell::RefCell::new(Vec::new()),
         }
@@ -2170,7 +2306,7 @@ impl<'a> Structurer<'a> {
             // try/catch, while the statement-block rejection outside
             // groups stays.
             let mut exempt: HashSet<usize> = self.handler_group.keys().copied().collect();
-            for g in &self.groups {
+            for g in self.groups.iter() {
                 if let Some(b) = self.cfg.block_at(g.start) {
                     exempt.insert(b);
                 }
@@ -2184,7 +2320,7 @@ impl<'a> Structurer<'a> {
             // Blocks whose every CFG exit is abrupt (return/throw or
             // none): a route landing there dies before any parked
             // merge, so it never skips a shared RETURN tail.
-            let mut abrupt_only: HashSet<usize> = HashSet::new();
+            let mut abrupt_only: HashSet<usize> = HashSet::default();
             for b in 0..self.results.len() {
                 let term_abrupt = matches!(
                     self.results[b].term,
@@ -2400,7 +2536,7 @@ impl<'a> Structurer<'a> {
     /// source whose goto lands back inside the protected span is the
     /// catch body's `continue` (loop back edge), not a forward merge.
     fn flows_back_into_span(&self, p: usize, start_pc: u32, end_pc: u32) -> bool {
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         let mut q: Vec<usize> = self.cfg.blocks[p].succ.clone();
         let mut budget = 512usize;
         while let Some(b) = q.pop() {
@@ -2475,11 +2611,11 @@ impl<'a> Structurer<'a> {
                 // sleep block): the genuine header sits upstream.
                 return false;
             }
-            let mut xs: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut xs: HashMap<usize, Vec<usize>> = HashMap::default();
             for e in &self.cfg.exc_edges {
                 xs.entry(e.from).or_default().push(e.to);
             }
-            return can_reach_cfg_barred(self.cfg, &xs, cur, p, &HashSet::new(), 8192);
+            return can_reach_cfg_barred(self.cfg, &xs, cur, p, &HashSet::default(), 8192);
         }
         false
     }
@@ -2544,9 +2680,9 @@ impl<'a> Structurer<'a> {
             if universe.contains(&p) && self.closes_back_edge(cur, p, dom, entry, use_exc) {
                 if single_enclosing_succ {
                     let x = self.cfg.blocks[cur].succ[0];
-                    let mut barriers: HashSet<usize> = HashSet::new();
+                    let mut barriers: HashSet<usize> = HashSet::default();
                     barriers.insert(x);
-                    if !can_reach_cfg_barred(self.cfg, &HashMap::new(), cur, p, &barriers, 8192) {
+                    if !can_reach_cfg_barred(self.cfg, &HashMap::default(), cur, p, &barriers, 8192) {
                         continue;
                     }
                 }
@@ -2596,7 +2732,7 @@ impl<'a> Structurer<'a> {
         // walk-side consumers must use the exc-only subset).
         {
             let idom = compute_dominators(self.cfg, &universe, self.cfg.entry);
-            let mut lh: HashSet<usize> = HashSet::new();
+            let mut lh: HashSet<usize> = HashSet::default();
             self.precompute_exc_retry(&universe, &idom, &mut lh);
         }
 
@@ -2612,11 +2748,11 @@ impl<'a> Structurer<'a> {
             })
             .collect();
 
-        let mut claimed = HashSet::new();
+        let mut claimed = HashSet::default();
         self.walk(
             self.cfg.entry,
             &universe,
-            &HashSet::new(),
+            &HashSet::default(),
             &top_groups,
             &mut claimed,
             true,
@@ -2709,7 +2845,7 @@ impl<'a> Structurer<'a> {
         // the post-try fall-out `goto tail` was elided as "the owner
         // will emit it" and the shared `return tz` tail vanished from
         // the try's normal path — 缺少返回语句 x2 trees).
-        let mut structured_here: HashSet<usize> = HashSet::new();
+        let mut structured_here: HashSet<usize> = HashSet::default();
         let _ = &mut first;
         loop {
             guard += 1;
@@ -3041,7 +3177,7 @@ impl<'a> Structurer<'a> {
                         let do_top = parts.pop().unwrap();
                         let mut members = match &loop_r {
                             Region::Loop { members, .. } => members.clone(),
-                            _ => HashSet::new(),
+                            _ => HashSet::default(),
                         };
                         members.insert(n);
                         parts.push(Region::Loop {
@@ -3275,8 +3411,8 @@ impl<'a> Structurer<'a> {
                             if m == cur {
                                 continue;
                             }
-                            let mut vis_t: HashSet<usize> = HashSet::new();
-                            let mut vis_f: HashSet<usize> = HashSet::new();
+                            let mut vis_t: HashSet<usize> = HashSet::default();
+                            let mut vis_f: HashSet<usize> = HashSet::default();
                             if self.diamond_side(taken, m, universe, &bstop, claimed, &mut vis_t, 0)
                                 && self
                                     .diamond_side(fall, m, universe, &bstop, claimed, &mut vis_f, 0)
@@ -3350,11 +3486,11 @@ impl<'a> Structurer<'a> {
                                 && !self.loops_stack.contains(&fh)
                             {
                                 let exc_succ: HashMap<usize, Vec<usize>> =
-                                    self.cfg.exc_edges.iter().fold(HashMap::new(), |mut m, e| {
+                                    self.cfg.exc_edges.iter().fold(HashMap::default(), |mut m, e| {
                                         m.entry(e.from).or_default().push(e.to);
                                         m
                                     });
-                                let mut barriers: HashSet<usize> = HashSet::new();
+                                let mut barriers: HashSet<usize> = HashSet::default();
                                 barriers.insert(fh);
                                 barriers.insert(cur);
                                 barriers.insert(fall);
@@ -3665,7 +3801,7 @@ impl<'a> Structurer<'a> {
                         // naturally) needs no copy — completing it would
                         // duplicate the tail through every such if in
                         // the corpus (25-class matrix churn).
-                        let mut jump_exempt: HashSet<usize> = HashSet::new();
+                        let mut jump_exempt: HashSet<usize> = HashSet::default();
                         Region::jump_targets(&arm, &mut jump_exempt);
                         jump_exempt.extend(self.loops_stack.iter().copied());
                         jump_exempt.extend(self.case_arm_ctx.iter().filter_map(|c| c.1));
@@ -3675,7 +3811,7 @@ impl<'a> Structurer<'a> {
                         // `taken` up to the blocks this arm already copied
                         // (their per-arrival copies render inside the arm;
                         // the sibling emits the rest).
-                        let mut chain: HashSet<usize> = HashSet::new();
+                        let mut chain: HashSet<usize> = HashSet::default();
                         if bypass {
                             let mut b = taken;
                             for _ in 0..64 {
@@ -4648,7 +4784,7 @@ impl<'a> Structurer<'a> {
                             let mut barriers = stop.clone();
                             barriers.insert(cur);
                             let tail_universe = reachable_within(self.cfg, f, &barriers);
-                            let mut fresh: HashSet<usize> = HashSet::new();
+                            let mut fresh: HashSet<usize> = HashSet::default();
                             let r = self.walk(f, &tail_universe, &stop, active, &mut fresh, true);
                             self.copied_tails.insert(f);
                             parts.push(r);
@@ -5145,7 +5281,7 @@ impl<'a> Structurer<'a> {
         let Some(target) = start_blk else {
             return false;
         };
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         let mut q: VecDeque<usize> = VecDeque::new();
         q.push_back(from);
         seen.insert(from);
@@ -5188,7 +5324,7 @@ impl<'a> Structurer<'a> {
     fn expand_orphan_group_tails(&self, out: &mut HashSet<usize>, from: usize) {
         let structuring = self.structuring_groups.borrow().clone();
         let mut frontier: Vec<usize> = vec![from];
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         let mut guard = 0;
         while let Some(b) = frontier.pop() {
             guard += 1;
@@ -5318,8 +5454,8 @@ impl<'a> Structurer<'a> {
             saw_live = true;
             // Forward BFS within the universe; collect the first blocks
             // that leave it (stop members or out-of-universe succs).
-            let mut escapes: HashSet<usize> = HashSet::new();
-            let mut seen: HashSet<usize> = HashSet::new();
+            let mut escapes: HashSet<usize> = HashSet::default();
+            let mut seen: HashSet<usize> = HashSet::default();
             let mut q: Vec<usize> = vec![t];
             seen.insert(t);
             while let Some(b) = q.pop() {
@@ -5568,7 +5704,7 @@ impl<'a> Structurer<'a> {
             if !universe.contains(&s0) {
                 continue;
             }
-            let mut d: HashMap<usize, u32> = HashMap::new();
+            let mut d: HashMap<usize, u32> = HashMap::default();
             let mut q: VecDeque<(usize, u32)> = VecDeque::new();
             d.insert(s0, 0);
             q.push_back((s0, 0));
@@ -5622,7 +5758,7 @@ impl<'a> Structurer<'a> {
                     }
                     preds.iter().all(|&p| {
                         b.succ.iter().any(|&t| {
-                            let mut seen: HashSet<usize> = HashSet::new();
+                            let mut seen: HashSet<usize> = HashSet::default();
                             let mut q: VecDeque<usize> = VecDeque::new();
                             q.push_back(t);
                             while let Some(x) = q.pop_front() {
@@ -5830,7 +5966,7 @@ impl<'a> Structurer<'a> {
         #[allow(unused_mut)]
         let mut tu = tu;
         COPY_DEPTH.with(|c| c.set(c.get() + 1));
-        let mut fresh: HashSet<usize> = HashSet::new();
+        let mut fresh: HashSet<usize> = HashSet::default();
         // Try groups that START (and whose handler heads live) inside the
         // copied universe must fire inside the copy: SESE passes only the
         // top-level groups, so a copied loop-top try head re-walked from a
@@ -5886,7 +6022,7 @@ impl<'a> Structurer<'a> {
     /// i.e. it heads a method-tail region rather than a self-contained
     /// abrupt epilogue.
     fn reaches_any_return(&self, b: usize) -> bool {
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         let mut q: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
         q.push_back(b);
         let mut budget = 4096;
@@ -5960,7 +6096,7 @@ impl<'a> Structurer<'a> {
     /// live fall-through flow some walk emits itself, and copying it
     /// duplicates statements or whole try-containing tails.
     fn cfg_all_paths_terminate(&self, b: usize) -> bool {
-        let mut visited: HashSet<usize> = HashSet::new();
+        let mut visited: HashSet<usize> = HashSet::default();
         let mut q: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
         q.push_back(b);
         while let Some(x) = q.pop_front() {
@@ -6023,13 +6159,13 @@ impl<'a> Structurer<'a> {
                         if matches!(
                             target.as_ref(),
                             crate::ir::expr::Expr::Field { name, .. }
-                                if self.final_fields.contains(name)
+                                if self.final_fields.contains(name.as_ref())
                         )
                 )
             })
         };
         let mut x = b;
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         for _ in 0..8 {
             if !seen.insert(x) {
                 return false;
@@ -6064,8 +6200,8 @@ impl<'a> Structurer<'a> {
         }
         let mut barriers: HashSet<usize> = stop.union(claimed).copied().collect();
         barriers.remove(&cur);
-        let mut hits: HashSet<usize> = HashSet::new();
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut hits: HashSet<usize> = HashSet::default();
+        let mut seen: HashSet<usize> = HashSet::default();
         let _ = universe;
         let mut q: VecDeque<usize> = self.cfg.blocks[cur].succ.iter().copied().collect();
         while let Some(b) = q.pop_front() {
@@ -6224,7 +6360,7 @@ impl<'a> Structurer<'a> {
     /// Nearest block reachable from both `a` and `b` (min total BFS dist).
     fn branch_confluence(&self, a: usize, b: usize, universe: &HashSet<usize>) -> Option<usize> {
         let bfs = |s0: usize| -> HashMap<usize, u32> {
-            let mut d: HashMap<usize, u32> = HashMap::new();
+            let mut d: HashMap<usize, u32> = HashMap::default();
             let mut q: VecDeque<(usize, u32)> = VecDeque::new();
             d.insert(s0, 0);
             q.push_back((s0, 0));
@@ -6371,7 +6507,7 @@ impl<'a> Structurer<'a> {
                     visited.insert(cur);
                     let s0 = b.succ[0];
                     let s1 = b.succ[1];
-                    let mut v2 = HashSet::new();
+                    let mut v2 = HashSet::default();
                     let ok =
                         self.diamond_side(s0, merge, universe, stop, claimed, &mut v2, depth + 1)
                             && self.diamond_side(
@@ -6441,7 +6577,7 @@ impl<'a> Structurer<'a> {
     /// Fallthrough/Goto blocks (walk-side twin of the strip helper).
     pub(crate) fn is_stmt_free_chain_to_block(&self, from: usize, to: usize) -> bool {
         let mut x = from;
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         for _ in 0..8 {
             if x == to {
                 return true;
@@ -6488,7 +6624,7 @@ impl<'a> Structurer<'a> {
         cands: &HashSet<usize>,
     ) -> bool {
         let mut x = from;
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         while x != to {
             if !seen.insert(x) {
                 return false;
@@ -6533,7 +6669,7 @@ impl<'a> Structurer<'a> {
         //   only escapes through them),
         // * blocks whose way back to the header requires an ENCLOSING loop's
         //   back edge (e.g. the outer increment block of nested loops).
-        let mut barriers: HashSet<usize> = HashSet::new();
+        let mut barriers: HashSet<usize> = HashSet::default();
         for l in &self.loops_stack {
             barriers.insert(*l);
         }
@@ -6545,11 +6681,11 @@ impl<'a> Structurer<'a> {
         // reach the header through that handler. Without these edges the
         // membership reachability below misclassifies the try head as a loop
         // EXIT and hoists the whole try/catch out of the loop body.
-        let mut exc_succ: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut exc_succ: HashMap<usize, Vec<usize>> = HashMap::default();
         for e in &self.cfg.exc_edges {
             exc_succ.entry(e.from).or_default().push(e.to);
         }
-        let mut members: HashSet<usize> = HashSet::new();
+        let mut members: HashSet<usize> = HashSet::default();
         members.insert(header);
         {
             let mut q: VecDeque<usize> = VecDeque::new();
@@ -6722,7 +6858,7 @@ impl<'a> Structurer<'a> {
                 .filter(|x| !members.contains(x) && *x != header)
                 .collect();
             let reach_all: HashSet<usize> = (0..self.cfg.blocks.len()).collect();
-            let lh: HashSet<usize> = HashSet::new();
+            let lh: HashSet<usize> = HashSet::default();
             self.materialize_content_exits(
                 &mut body,
                 header,
@@ -6928,7 +7064,7 @@ impl<'a> Structurer<'a> {
 
         // All case/default head blocks: a trailing Goto to one of them is a
         // switch fallthrough (no statement in Java).
-        let mut head_set: HashSet<usize> = HashSet::new();
+        let mut head_set: HashSet<usize> = HashSet::default();
         for (_, b, is_follow) in &case_groups {
             if !is_follow {
                 head_set.insert(*b);
@@ -7186,7 +7322,7 @@ impl<'a> Structurer<'a> {
                 let mut r = self.walk(
                     entry,
                     &body_universe,
-                    &HashSet::new(),
+                    &HashSet::default(),
                     &nested,
                     claimed,
                     allow,
@@ -7214,7 +7350,7 @@ impl<'a> Structurer<'a> {
 
         // Merge multi-catch: consecutive handlers with the same handler block
         // become one catch with multiple types.
-        let mut merged_handlers: Vec<(Vec<String>, u32, usize)> = Vec::new(); // types, hpc, hb
+        let mut merged_handlers: Vec<(Vec<std::sync::Arc<str>>, u32, usize)> = Vec::new(); // types, hpc, hb
         for (hpc, ty) in &g.handlers {
             let Some(hb) = self.cfg.block_at(*hpc) else {
                 continue;
@@ -7234,7 +7370,7 @@ impl<'a> Structurer<'a> {
         }
         let mut catches = Vec::new();
         for (tys, _hpc, hb) in &merged_handlers {
-            let mut hstop: HashSet<usize> = HashSet::new();
+            let mut hstop: HashSet<usize> = HashSet::default();
             for b in universe.iter().copied() {
                 if self.body_group.get(&b) == Some(&gi) {
                     hstop.insert(b);
@@ -7360,7 +7496,7 @@ impl<'a> Structurer<'a> {
                 );
             }
             if !shared_merge.is_empty() {
-                let tail = reachable_within(self.cfg, shared_merge[0], &HashSet::new());
+                let tail = reachable_within(self.cfg, shared_merge[0], &HashSet::default());
                 huniverse.retain(|b| !tail.contains(b) || *b == *hb || hf.contains(b));
                 if crate::dbg_flag!("JCDC_DBG_HUNIV") {
                     eprintln!("HUNIV2 gi={} after-strip={:?}", gi, {
@@ -7417,9 +7553,9 @@ impl<'a> Structurer<'a> {
                     // the enclosing sync group's span but its body flow
                     // never reaches it — stripped, the catch fell off the
                     // method end: 缺少返回语句).
-                    let mut og_body_reach: HashMap<usize, HashSet<usize>> = HashMap::new();
+                    let mut og_body_reach: HashMap<usize, HashSet<usize>> = HashMap::default();
                     {
-                        let mut by_og: HashMap<usize, Vec<usize>> = HashMap::new();
+                        let mut by_og: HashMap<usize, Vec<usize>> = HashMap::default();
                         for (b, og) in self.body_group.iter() {
                             by_og.entry(*og).or_default().push(*b);
                         }
@@ -7431,7 +7567,7 @@ impl<'a> Structurer<'a> {
                             // carves them out but continues after), so
                             // the BFS must pass through them.
                             let g = &self.groups[og];
-                            let mut reach: HashSet<usize> = HashSet::new();
+                            let mut reach: HashSet<usize> = HashSet::default();
                             if let Some(entry) = self.cfg.block_at(g.start) {
                                 let mut q: VecDeque<usize> = VecDeque::new();
                                 q.push_back(entry);
@@ -7446,7 +7582,7 @@ impl<'a> Structurer<'a> {
                                 // the hf_after filter skips it there, and
                                 // letting the BFS see it would mark the
                                 // tail re-emittable and strip it).
-                                let mut conts: HashMap<usize, usize> = HashMap::new();
+                                let mut conts: HashMap<usize, usize> = HashMap::default();
                                 for (j, gj) in self.groups.iter().enumerate() {
                                     if j == og {
                                         continue;
@@ -7506,7 +7642,7 @@ impl<'a> Structurer<'a> {
                             og_body_reach.insert(og, reach);
                         }
                     }
-                    let mut private: HashSet<usize> = HashSet::new();
+                    let mut private: HashSet<usize> = HashSet::default();
                     {
                         let mut pq: VecDeque<usize> = VecDeque::new();
                         for &s0 in &self.cfg.blocks[*hb].succ {
@@ -7555,7 +7691,7 @@ impl<'a> Structurer<'a> {
                         .pred
                         .iter()
                         .all(|p| self.handler_group.contains_key(p));
-                    let tail = reachable_within(self.cfg, cont, &HashSet::new());
+                    let tail = reachable_within(self.cfg, cont, &HashSet::default());
                     if sole_entry_hb {
                         huniverse.retain(|b| !tail.contains(b) || private.contains(b));
                     }
@@ -7580,7 +7716,7 @@ impl<'a> Structurer<'a> {
                     // 缺少返回语句, sj17 walk-only since HEAD (SESE renders
                     // the tail; javac masked it behind OCSP's DA error
                     // until the rejection suite fixed that).
-                    let tail = reachable_within(self.cfg, cont, &HashSet::new());
+                    let tail = reachable_within(self.cfg, cont, &HashSet::default());
                     huniverse.retain(|b| !tail.contains(b) || hf.contains(b));
                 }
             }
@@ -7612,7 +7748,7 @@ impl<'a> Structurer<'a> {
                     !gj.handlers.iter().all(|(h, _)| *h == gj.start)
                 })
                 .collect();
-            let mut r = self.walk(*hb, &huniverse, &HashSet::new(), &h_active, claimed, false);
+            let mut r = self.walk(*hb, &huniverse, &HashSet::default(), &h_active, claimed, false);
             // Handler exits into the post-try flow: any forward target that
             // is not part of a try body is a natural merge (the outer walk
             // emits those blocks after this region).
@@ -7633,7 +7769,7 @@ pub fn can_reach_cfg(cfg: &Cfg, from: usize, to: usize, budget: usize) -> bool {
     if from == to {
         return true;
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::default();
     let mut q = std::collections::VecDeque::new();
     q.push_back(from);
     seen.insert(from);
@@ -7667,7 +7803,7 @@ pub fn can_reach_avoiding(
     if from == to {
         return true;
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::default();
     let mut q = std::collections::VecDeque::new();
     if from != avoid {
         q.push_back(from);
@@ -7716,7 +7852,7 @@ pub fn can_reach_cfg_barred(
     if from == to {
         return true;
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::default();
     let mut q = std::collections::VecDeque::new();
     q.push_back(from);
     seen.insert(from);

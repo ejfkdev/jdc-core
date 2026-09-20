@@ -132,8 +132,11 @@ pub struct CaseGroup {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Catch {
     /// Exception class internal names (multi-catch when >1);
-    /// empty = catch-all (`finally` style / Throwable).
-    pub exc: Vec<String>,
+    /// empty = catch-all (`finally` style / Throwable). `Arc<str>`:
+    /// shared with the dex/classfile string tables through the whole
+    /// catch pipeline (Cfg → TryGroup → Region → Catch) — these used to
+    /// be re-allocated at every hop for every handler of every method.
+    pub exc: Vec<std::sync::Arc<str>>,
     /// Variable holding the exception parameter.
     pub var: u32,
     /// Per-occurrence printed name (avoids nested-catch collisions).
