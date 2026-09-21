@@ -1432,7 +1432,7 @@ impl<'a> Printer<'a> {
                     // byte[] FIELD (variables obscure type names in
                     // expression names) — 找不到符号 变量 PSK_ID_HASH x6.
                     let enclosing_static = cls.as_ref() != self.ctx.class_name()
-                        && self.ctx.class_name().starts_with(&format!("{}$", cls))
+                        && self.renders_nested_in(cls)
                         && !self.vt.vars.iter().any(|v| v.name == name)
                         && {
                             let mut cur = self.ctx.class_name().to_string();
@@ -1730,8 +1730,10 @@ impl<'a> Printer<'a> {
                         // intermediate class declares a same-named
                         // method (real member shadowing) or when type
                         // witnesses need an explicit receiver.
+                        // renders_nested_in: flat-rendered (digit-tail)
+                        // nested classes have NO lexical scope.
                         let enclosing_static = type_args.is_empty()
-                            && self.ctx.class_name().starts_with(&format!("{}$", cls))
+                            && self.renders_nested_in(cls)
                             && {
                                 let mut cur = self.ctx.class_name().to_string();
                                 let mut shadow = false;
@@ -2778,6 +2780,34 @@ impl<'a> Printer<'a> {
             return false;
         }
         self.ctx.outer_param_via_super(cls)
+    }
+
+    /// Is `cls` lexically enclosing the CURRENT class in the RENDERED
+    /// layout? Digit-tail classes (anonymous/d8-lambda shapes) are
+    /// emitted as separate flat top-level files — the nested lexical
+    /// scope they would provide does not exist there, so members of an
+    /// outer class must be QUALIFIED from them (weibo
+    /// CronetUrlRequest$3: bare `_$$Nest$misDoneLocked(..)` calls of
+    /// the outer's statics were unresolvable).
+    fn renders_nested_in(&self, cls: &str) -> bool {
+        let cur = self.ctx.class_name();
+        if !cur.starts_with(&format!("{}$", cls)) {
+            return false;
+        }
+        let mut c = cur.to_string();
+        while c.as_str() != cls {
+            let tail = c.rsplit('$').next().unwrap_or(&c);
+            if tail.is_empty()
+                || tail.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+            {
+                return false; // flat-rendered boundary: no lexical scope
+            }
+            match c.rfind('$') {
+                Some(i) => c.truncate(i),
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Instantiated SAM return for a cast to a generic functional
