@@ -145,9 +145,9 @@ pub fn compute_dominators(cfg: &Cfg, universe: &HashSet<usize>, entry: usize) ->
             }
         }
     }
-    for i in 0..n {
-        if idom[i] == usize::MAX {
-            idom[i] = i;
+    for (i, d) in idom.iter_mut().enumerate().take(n) {
+        if *d == usize::MAX {
+            *d = i;
         }
     }
     DomInfo { idom }
@@ -419,6 +419,7 @@ pub(crate) fn compute_postdominators(
 /// the nearest reconvergence point: the block (other than entry) reachable
 /// from ALL of entry's in-universe successors with the smallest total BFS
 /// distance. Blocks whose in-universe successors are empty are exits.
+#[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
 pub fn immediate_postdom(
     cfg: &Cfg,
     results: &[BlockResult],
@@ -481,7 +482,7 @@ pub fn immediate_postdom(
     // readAllBytes (double read). The successor stays a candidate when it
     // is the entry's ONLY out (degenerate) or a statement-free stub (a
     // transparent trampoline to the real merge, common in javac output).
-    let self_loop = cfg.blocks[entry].succ.iter().any(|&x| x == entry);
+    let self_loop = cfg.blocks[entry].succ.contains(&entry);
     let mut best: Option<(u32, usize)> = None;
     let mut any_rejected = false;
     for (&cand, &d0) in dists[0].iter() {
@@ -489,7 +490,7 @@ pub fn immediate_postdom(
             continue;
         }
         let mut rejected = false;
-        if !self_loop && succs.iter().any(|&sc| sc == cand) {
+        if !self_loop && succs.contains(&cand) {
             // A "bare goto" stub: exactly one machine instruction, the
             // terminator itself. (Not "no statements": a block may carry
             // stack leftovers — a lone `getstatic` before its `goto` — with
@@ -835,7 +836,7 @@ pub fn immediate_postdom(
         }
         let mut best2: Option<(u32, usize)> = None;
         for (&cand, &d0) in dists2[0].iter() {
-            if cand == entry || succs.iter().any(|&sc| sc == cand) {
+            if cand == entry || succs.contains(&cand) {
                 // rejected candidates stay rejected; direct successors are
                 // branches, never the merge (the bar above already keeps
                 // them out of the maps, this guards the s0 self-entry).
@@ -1063,7 +1064,7 @@ pub fn group_exceptions_with(
     // and same-key conflicts always land in one bucket. Keys sorted for
     // deterministic merge order.
     let mut bucket_keys: Vec<u64> = {
-        let mut v: Vec<u64> = key_fps.iter().copied().collect();
+        let mut v: Vec<u64> = key_fps.to_vec();
         v.sort_unstable();
         v.dedup();
         v
@@ -1335,6 +1336,9 @@ pub fn group_exceptions_with(
 // Region tree
 // ---------------------------------------------------------------------------
 
+// Seq/Loop payloads are tiny; If/Switch carry inline arms — boxing the
+// fat variants would churn every pattern match in the structurer.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Region {
     /// Statements of one basic block; terminal handled by the enclosing region.
@@ -1649,7 +1653,7 @@ impl<'a> Structurer<'a> {
         if let Some(&ogi) = self.body_group.get(&t) {
             let g = &self.groups[ogi];
             let cs = self.cfg.blocks[cur].start;
-            let cur_in_span = cs >= g.start && (cs as u32) < (g.end as u32);
+            let cur_in_span = cs >= g.start && cs < g.end;
             if g.start == ts && claimed.contains(&t) && !cur_in_span {
                 return false;
             }
@@ -1863,7 +1867,7 @@ impl<'a> Structurer<'a> {
         let scan = |a: usize| -> bool {
             let gend = self.groups[a].end;
             for nb in self.cfg.blocks.iter() {
-                if (nb.start as u32) < gend as u32 {
+                if nb.start < gend {
                     continue;
                 }
                 if stop.contains(&nb.id) {
@@ -2084,11 +2088,9 @@ fn strip_fallthrough_goto(r: Region, heads: &HashSet<usize>) -> Region {
     match r {
         Region::Goto { target } if heads.contains(&target) => Region::Empty,
         Region::Seq(mut v) => {
-            if let Some(last) = v.last() {
-                if let Region::Goto { target } = last {
-                    if heads.contains(target) {
-                        v.pop();
-                    }
+            if let Some(Region::Goto { target }) = v.last() {
+                if heads.contains(target) {
+                    v.pop();
                 }
             }
             match v.len() {
@@ -4088,6 +4090,7 @@ impl<'a> Structurer<'a> {
                                     region_shape(&arm)
                                 );
                             }
+                            #[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
                             fn fill_bypass(
                                 st: &mut Structurer,
                                 r: &mut Region,
@@ -4352,6 +4355,7 @@ impl<'a> Structurer<'a> {
                                     // fall-INTO Empty (target == chain
                                     // head) stays empty and drops into the
                                     // appended copy.
+                                    #[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
                                     fn fill_skip_empties(
                                         st: &mut Structurer,
                                         r: &mut Region,
@@ -4696,7 +4700,7 @@ impl<'a> Structurer<'a> {
                     }
                     fn region_pure_block(
                         rg: &Region,
-                        results: &Vec<BlockResult>,
+                        results: &[BlockResult],
                         cfg: &Cfg,
                         follow: Option<usize>,
                     ) -> Option<usize> {
@@ -4824,7 +4828,7 @@ impl<'a> Structurer<'a> {
                             barriers.insert(cur);
                             let tail_universe = reachable_within(self.cfg, f, &barriers);
                             let mut fresh: HashSet<usize> = HashSet::default();
-                            let r = self.walk(f, &tail_universe, &stop, active, &mut fresh, true);
+                            let r = self.walk(f, &tail_universe, stop, active, &mut fresh, true);
                             self.copied_tails.insert(f);
                             parts.push(r);
                             break;
@@ -6475,6 +6479,7 @@ impl<'a> Structurer<'a> {
     /// goto), possibly via nested diamond headers. All traversed blocks are
     /// added to `visited` so the caller can claim them.
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
     fn branches_are_diamond(
         &self,
         a: usize,
@@ -6489,6 +6494,7 @@ impl<'a> Structurer<'a> {
             && self.diamond_side(b, merge, universe, stop, claimed, visited, 0)
     }
 
+    #[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
     fn diamond_side(
         &self,
         blk: usize,
@@ -6924,6 +6930,7 @@ impl<'a> Structurer<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
     pub(crate) fn structure_switch(
         &mut self,
         block: usize,
@@ -7692,18 +7699,17 @@ impl<'a> Structurer<'a> {
                                 continue;
                             }
                             match self.body_group.get(&x) {
-                                Some(og) if *og != gi => {
+                                Some(og) if *og != gi
                                     // Owned by another group: private only
                                     // when that group's body flow cannot
                                     // re-emit it.
-                                    if og_body_reach
+                                    && og_body_reach
                                         .get(og)
                                         .map(|r| r.contains(&x))
                                         .unwrap_or(false)
-                                    {
+                                    => {
                                         continue;
                                     }
-                                }
                                 _ => {}
                             }
                             if self

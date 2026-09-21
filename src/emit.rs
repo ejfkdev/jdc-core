@@ -178,16 +178,12 @@ impl<'a> Printer<'a> {
                     crate::types::JavaType::Boolean
                 )
             }
-            Expr::Bin { op, l, r, .. }
-                if matches!(
-                    op,
-                    crate::ir::expr::BinOp::And
-                        | crate::ir::expr::BinOp::Or
-                        | crate::ir::expr::BinOp::Xor
-                ) =>
-            {
-                self.bool_ish_vt(l) && self.bool_ish_vt(r)
-            }
+            Expr::Bin {
+                op: crate::ir::expr::BinOp::And | crate::ir::expr::BinOp::Or | crate::ir::expr::BinOp::Xor,
+                l,
+                r,
+                ..
+            } => self.bool_ish_vt(l) && self.bool_ish_vt(r),
             _ => Self::bool_ish_expr(x),
         }
     }
@@ -237,7 +233,6 @@ impl<'a> Printer<'a> {
                         out.push(')');
                     }
                 }
-                return;
             }
             Expr::Cond { c, t, f } => {
                 // `x ? true : false` → x ; `x ? false : true` → !x
@@ -1586,7 +1581,7 @@ impl<'a> Printer<'a> {
                     // `super(parent, spliterator)` (K := FindTask<..>
                     // accepts the arg fine; the raw erasure cast does not).
                     if skip_outer_arg {
-                        if desc.args.len() == args.len() && desc.args.len() >= 1 {
+                        if desc.args.len() == args.len() && !desc.args.is_empty() {
                             self.args_typed(&args[1..], &desc.args[1..], out);
                         } else {
                             self.args(&args[1..], out);
@@ -2524,11 +2519,11 @@ impl<'a> Printer<'a> {
                                 // erased impl return CompletionStage needs no
                                 // cast, and printing one breaks the outer
                                 // chain's inference).
-                                if let TypeRef::G(g0) = e.type_ref() {
-                                    if let crate::types::GenericType::Class(cs) = &g0 {
-                                        if crate::typeutil::classsig_internal(cs).as_str() == t.as_ref() {
-                                            return true;
-                                        }
+                                if let TypeRef::G(crate::types::GenericType::Class(cs)) =
+                                    e.type_ref()
+                                {
+                                    if crate::typeutil::classsig_internal(&cs).as_str() == t.as_ref() {
+                                        return true;
                                     }
                                 }
                                 let crate::types::JavaType::Object(e0) = e.type_ref().erased()
@@ -3038,7 +3033,7 @@ impl<'a> Printer<'a> {
             }
             return dotted.replace('$', ".");
         }
-        if pkg_of(internal) == pkg_of(&self.ctx.class_name()) {
+        if pkg_of(internal) == pkg_of(self.ctx.class_name()) {
             let simple = if keep_dollar {
                 internal.rsplit('/').next().unwrap_or(internal).to_string()
             } else {

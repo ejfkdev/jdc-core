@@ -472,11 +472,9 @@ impl Expr {
             Expr::NewMultiArray { ty, .. } => ty.clone(),
             Expr::Field { ty, .. } => ty.clone(),
             Expr::Method { desc, .. } => desc.ret.clone().into(),
-            Expr::ArrayIndex { array, .. } => match &**array {
-                other => match other.type_ref().erased() {
-                    JavaType::Array(inner) => (*inner).clone().into(),
-                    t => t.into(),
-                },
+            Expr::ArrayIndex { array, .. } => match array.type_ref().erased() {
+                JavaType::Array(inner) => (*inner).clone().into(),
+                t => t.into(),
             },
             Expr::Cast { ty, .. } => ty.clone(),
             Expr::InstanceOf { .. } => JavaType::Boolean.into(),

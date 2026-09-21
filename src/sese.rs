@@ -208,11 +208,10 @@ impl<'a> Structurer<'a> {
             for &u in universe.iter() {
                 let is_self_loop = u == h && self.cfg.blocks[h].succ.contains(&h);
                 let is_back_edge = u != h && idom.dominates(h, u);
-                if self.cfg.blocks[u].succ.contains(&h) && (is_self_loop || is_back_edge) {
-                    if members.insert(u) {
+                if self.cfg.blocks[u].succ.contains(&h) && (is_self_loop || is_back_edge)
+                    && members.insert(u) {
                         stack.push(u);
                     }
-                }
             }
             if let Some(srcs) = exc_back_sources.get(&h) {
                 for &c in srcs {
@@ -271,8 +270,8 @@ impl<'a> Structurer<'a> {
             top_groups,
             depth: 0,
         };
-        let r = self.sese_region(self.cfg.entry, &HashSet::default(), &mut ctx);
-        r
+        
+        self.sese_region(self.cfg.entry, &HashSet::default(), &mut ctx)
     }
 
     /// Immediate post-dominator of `b` (None if only the virtual exit, i.e. all
@@ -839,11 +838,10 @@ impl<'a> Structurer<'a> {
                 if ctx.loop_headers.contains(&sx) && !seen.contains(&sx) {
                     // Re-entry into a loop header is a back-edge jump
                     // (continue), not a fallthrough — abrupt.
-                    if self.cfg.blocks[c].succ.iter().any(|&o| o == sx) && sx != target {
-                        if self.cfg.blocks[sx].start <= self.cfg.blocks[c].start {
+                    if self.cfg.blocks[c].succ.contains(&sx) && sx != target
+                        && self.cfg.blocks[sx].start <= self.cfg.blocks[c].start {
                             continue;
                         }
-                    }
                 }
                 stack.push(sx);
             }
@@ -917,7 +915,7 @@ impl<'a> Structurer<'a> {
     /// CONTENT (exit_has_content; stub-chain exits like Pattern.clazz's
     /// switch-case goto stubs are exempt and keep their bare breaks) gets
     /// its cascade structured ONCE on a clean barriered scope (all exits
-    /// + loop members + enclosing headers), then every `Goto{E}` in the
+    /// plus loop members plus enclosing headers), then every `Goto{E}` in the
     /// body becomes `Seq[cascade-copy, Goto{E}]`: the break keeps its
     /// conversion binding while the cascade runs before it — the golden
     /// shape (CAS unlink executes, then break restarts the outer loop).
@@ -925,6 +923,7 @@ impl<'a> Structurer<'a> {
     /// render that jump as the matching break/continue (conversion
     /// resolves against the enclosing loop stack; a cascade reaching an
     /// UNENCLOSED header falls back to the bare break).
+    #[allow(clippy::too_many_arguments)] // one materialization context, split would obscure
     pub(crate) fn materialize_content_exits(
         &mut self,
         body: &mut Region,
@@ -1136,7 +1135,7 @@ impl<'a> Structurer<'a> {
                 seen2.insert(e);
                 let mut found = false;
                 while let Some(b) = q2.pop() {
-                    if self.cfg.blocks[b].succ.iter().any(|&n| n == header) {
+                    if self.cfg.blocks[b].succ.contains(&header) {
                         found = true;
                         break;
                     }
@@ -1213,7 +1212,7 @@ impl<'a> Structurer<'a> {
             // arm-local; the arm-internal trailing gotos still elide via
             // goto_is_last inside the copy.
             let saved_tails = self.copied_tails.clone();
-            let r = self.walk(e, &tu, &wstop, &ctx_top_groups, &mut fresh, true);
+            let r = self.walk(e, &tu, &wstop, ctx_top_groups, &mut fresh, true);
             self.copied_tails = saved_tails;
             if matches!(r, Region::Empty) {
                 continue;
@@ -1784,11 +1783,11 @@ impl<'a> Structurer<'a> {
                 let succs = &self.cfg.blocks[*block].succ;
                 let mut hit = false;
                 if matches!(**then_r, Region::Empty) && succs.get(1) == Some(&e) {
-                    *then_r = Box::new(replacement.clone());
+                    **then_r = replacement.clone();
                     hit = true;
                 }
                 if matches!(**else_r, Region::Empty) && succs.first() == Some(&e) {
-                    *else_r = Box::new(replacement.clone());
+                    **else_r = replacement.clone();
                     hit = true;
                 }
                 hit |= self.replace_empty_arms_for(then_r, e, replacement);
@@ -1826,6 +1825,7 @@ impl<'a> Structurer<'a> {
     /// replaced; loose mode additionally replaces arm-internal sites
     /// whose enclosing Seq has live siblings. A MID-Seq Goto leaf is
     /// never replaced in either mode (live siblings follow it directly).
+    #[allow(clippy::only_used_in_recursion)] // `strict` threads through the recursive descent by design
     fn splice_exit_copies_with(
         r: &mut Region,
         e: usize,

@@ -50,8 +50,6 @@ pub struct VarTable {
     pub handler_starts: Vec<u16>,
 }
 
-/// Pull the typed Code attribute out of a method, if any.
-
 impl VarTable {
     pub fn add_stack_var(&mut self, slot: u16, name: String, ty: TypeRef) -> u32 {
         let id = self.add(slot, name, ty, false, 0, u16::MAX, true);
@@ -82,6 +80,7 @@ impl VarTable {
         self.add(slot, name, ty, false, 0, u16::MAX, true)
     }
 
+    #[allow(clippy::too_many_arguments)] // one builder for all var kinds
     fn add(
         &mut self,
         slot: u16,

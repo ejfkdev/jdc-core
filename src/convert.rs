@@ -110,22 +110,22 @@ fn strip_trailing_goto(s: &mut Stmt, follow: Option<usize>) {
         }
         _ => return,
     };
-    while let Some(last) = items.last_mut() {
+    // Single descent, no iteration: every arm either strips or stops
+    // (clippy::never_loop was right — this was a while-let in name
+    // only; `if let` states the actual control flow).
+    if let Some(last) = items.last_mut() {
         match last {
             Stmt::Goto(t) if *t as usize == f => {
                 items.pop();
-                return;
             }
             Stmt::Block(inner) if !inner.is_empty() => {
-                // descend into trailing block
+                // descend into the trailing block one level
                 let n = inner.len();
                 if matches!(inner[n - 1], Stmt::Goto(t) if t as usize == f) {
                     inner.pop();
-                    return;
                 }
-                break;
             }
-            _ => break,
+            _ => {}
         }
     }
 }
@@ -1384,6 +1384,9 @@ fn stmts_to_stmt(v: Vec<Stmt>) -> Stmt {
 /// reachable as the do-while's natural completion. Returns None when
 /// the test is not try-wrapped (plain rotation applies) or when the
 /// shape is ambiguous (both If arms materialized).
+// The Err payload IS the statement being rejected — boxing it would
+// churn every call site for a cold path.
+#[allow(clippy::result_large_err)]
 fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
     // The exit side of the embedded test: an Empty region conversion
     // (empty block / missing else) or an ALREADY-materialized plain
@@ -1406,7 +1409,7 @@ fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
                 let then_empty = is_empty(then_stmt);
                 let else_empty = else_stmt.as_ref().map(|e| is_empty(e)).unwrap_or(true);
                 if then_empty && !else_empty {
-                    *then_stmt = Box::new(Stmt::Break(None));
+                    **then_stmt = Stmt::Break(None);
                     true
                 } else if else_empty && !then_empty {
                     *else_stmt = Some(Box::new(Stmt::Break(None)));
@@ -1452,12 +1455,12 @@ fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>) {
             };
         }
     };
-    if let Some(first) = items.first() {
-        if let Stmt::If {
-            cond: c,
-            then_stmt,
-            else_stmt,
-        } = first
+    if let Some(Stmt::If {
+        cond: c,
+        then_stmt,
+        else_stmt,
+    }) = items.first()
+    {
         {
             if c == cond {
                 let inner = if items.len() == 1 {

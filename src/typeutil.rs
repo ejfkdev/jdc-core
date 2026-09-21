@@ -62,12 +62,10 @@ pub fn g_has_typevar(g: &crate::types::GenericType) -> bool {
         G::TypeVar(_) => true,
         G::Array(i) => g_has_typevar(i),
         G::Class(cs) => cs.parts.iter().any(|p| p.args.iter().any(g_has_typevar)),
-        G::Wildcard(w) => match w {
-            crate::types::WildcardBound::Extends(i) | crate::types::WildcardBound::Super(i) => {
-                g_has_typevar(i)
-            }
-            _ => false,
-        },
+        G::Wildcard(crate::types::WildcardBound::Extends(i) | crate::types::WildcardBound::Super(i)) => {
+            g_has_typevar(i)
+        }
+        G::Wildcard(_) => false,
         _ => false,
     }
 }
