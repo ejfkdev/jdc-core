@@ -1447,7 +1447,23 @@ impl<'a> Printer<'a> {
                             !shadow
                         };
                     if !enclosing_static && (cls.as_ref() != self.ctx.class_name() || shadowed_by_local) {
-                        out.push_str(&self.shorten(cls));
+                        // The owner must name a DECLARABLE class: the
+                        // anonymous→interface/Object fallback (right for
+                        // phi-compatible type positions) leaves the field
+                        // unresolvable — `Object.$SwitchMap$java$math$
+                        // RoundingMode` (485 weibo / 308 lark / 217
+                        // weixin cannot-finds; the synthetic holder
+                        // `LongMath$1` IS rendered as a flat file with
+                        // the field, 0 own errors). Fall back to the
+                        // concrete `$N` name — `$` and digits are legal
+                        // Java identifier characters, and the holder
+                        // always sits in the referring class's package.
+                        let rendered = self.shorten(cls);
+                        if rendered == "Object" && cls.as_ref() != "java/lang/Object" {
+                            out.push_str(&self.shorten_concrete(cls));
+                        } else {
+                            out.push_str(&rendered);
+                        }
                         out.push('.');
                     }
                     out.push_str(&java_ident(name));
