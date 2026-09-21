@@ -224,6 +224,19 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// Per-method walk WORK budget (None = off): Σ universe.len() over
+    /// visits — the deterministic per-visit-cost bound (see the work
+    /// budget block in `walk`).
+    static WALK_WORK_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Install/clear the per-method walk work budget.
+pub fn set_walk_work_budget(v: Option<u64>) {
+    WALK_WORK_OVERRIDE.with(|c| c.set(v));
+}
+
 /// Install/clear the per-method walk visit budget.
 pub fn set_walk_visit_budget(v: Option<u64>) {
     WALK_VISIT_OVERRIDE.with(|c| c.set(v));
@@ -1523,6 +1536,8 @@ pub struct Structurer<'a> {
     walk_depth: usize,
     /// Remaining walk visits when a budget is armed (u64::MAX = off).
     walk_visits_left: std::cell::Cell<u64>,
+    /// Remaining walk WORK (Σ universe.len() per visit); u64::MAX = off.
+    walk_work_left: std::cell::Cell<u64>,
     /// Walk wall-clock deadline (see set_walk_deadline); None = off.
     walk_deadline: Option<std::time::Instant>,
     /// Method-invariant rejection sets for postdom_ipdom, computed once.
@@ -2267,6 +2282,9 @@ impl<'a> Structurer<'a> {
             walk_visits_left: std::cell::Cell::new(
                 WALK_VISIT_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX),
             ),
+            walk_work_left: std::cell::Cell::new(
+                WALK_WORK_OVERRIDE.with(|c| c.get()).unwrap_or(u64::MAX),
+            ),
             walk_deadline: WALK_DEADLINE.with(|c| c.get()),
             copy_budget: std::cell::Cell::new(
                 BUDGET_OVERRIDE
@@ -2792,8 +2810,8 @@ impl<'a> Structurer<'a> {
                 return Region::Goto { target: entry };
             }
         }
-        // Visit budget: same degradation class once the exploration ran
-        // long. u64::MAX = off.
+        // Visit-COUNT budget: same degradation class once the exploration
+        // ran long. u64::MAX = off.
         {
             let left = self.walk_visits_left.get();
             if left == 0 {
@@ -2804,6 +2822,27 @@ impl<'a> Structurer<'a> {
             {
                 WALK_VISITS_TOTAL.with(|c| c.set(c.get() + 1));
             }
+        }
+        // WORK budget: deterministic stand-in for the wall-clock deadline.
+        // Each visit is charged `universe.len()` — the proxy for its
+        // dominant cost (`compute_dominators` over the universe). The
+        // count budget under-bounds per-visit cost (Telegram's
+        // exponential family: 6ms/visit × 14k visits = minutes), which
+        // the wall-clock deadline used to catch — but wall-clock is
+        // nondeterministic under worker contention (a descheduled thread
+        // crosses any fixed ms bound; reqable's legit 11k-insn enum
+        // <clinit> flipped `DEBUG(var0)`/`DEBUG(var1)` between identical
+        // -t 16 runs, stable at -t 1). The work budget bounds the same
+        // pathologies deterministically: legit corpus work maxes at
+        // ~200k (4-corpus Σuniverse census), Telegram-scale explosions
+        // are cut at the budget regardless of scheduling. u64::MAX = off.
+        {
+            let left = self.walk_work_left.get();
+            let cost = universe.len().max(1) as u64;
+            if left <= cost {
+                return Region::Goto { target: entry };
+            }
+            self.walk_work_left.set(left - cost);
         }
         self.walk_depth += 1;
         let r = self.walk_inner(entry, universe, stop, active, claimed, allow_claimed_entry);

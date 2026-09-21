@@ -165,24 +165,42 @@ impl VarTable {
     }
 
     pub fn var(&self, id: u32) -> &VarInfo {
-        static DUMMY: std::sync::OnceLock<VarInfo> = std::sync::OnceLock::new();
-        self.vars.get(id as usize).unwrap_or_else(|| {
-            DUMMY.get_or_init(|| VarInfo {
-                id,
-                slot: u16::MAX,
-                name: format!("var{}", id),
-                ty: TypeRef::J(crate::types::JavaType::Int),
-                is_param: false,
-                range_start: 0,
-                range_end: 0,
-                synthetic_name: true,
-            })
-        })
+        self.vars.get(id as usize).unwrap_or_else(|| dummy_var(id))
     }
 
     pub fn var_mut(&mut self, id: u32) -> &mut VarInfo {
         &mut self.vars[id as usize]
     }
+}
+
+/// Out-of-range fallback for `VarTable::var`: a PER-ID leaked dummy.
+/// The previous form was a single process-wide `OnceLock<VarInfo>` —
+/// initialized by whichever worker thread first hit a dangling id, so
+/// EVERY dangling reference in the run printed THAT thread's id
+/// (`var0`/`var1` flips across identical runs; three reqable enum
+/// families flipped in lockstep). Keying by id makes the fallback
+/// deterministic; leaks are bounded by distinct dangling ids per run.
+fn dummy_var(id: u32) -> &'static VarInfo {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static DUMMIES: OnceLock<Mutex<HashMap<u32, &'static VarInfo>>> = OnceLock::new();
+    let map = DUMMIES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = map.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&v) = g.get(&id) {
+        return v;
+    }
+    let v: &'static VarInfo = Box::leak(Box::new(VarInfo {
+        id,
+        slot: u16::MAX,
+        name: format!("var{}", id),
+        ty: TypeRef::J(crate::types::JavaType::Int),
+        is_param: false,
+        range_start: 0,
+        range_end: 0,
+        synthetic_name: true,
+    }));
+    g.insert(id, v);
+    v
 }
 
 pub fn sig_type_at(
