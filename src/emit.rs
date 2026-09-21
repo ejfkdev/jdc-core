@@ -1143,11 +1143,19 @@ impl<'a> Printer<'a> {
                     // parameter value, not the synthetic outer instance —
                     // `0.new a()` / `null.new a()` are not valid Java.
                     && !matches!(args[0], Expr::Const(_))
-                    // Anonymous classes (digit simple names) are emitted
-                    // as separate top-level-ish classes here — a
-                    // qualified `this.new 1(...)` is not valid Java; the
-                    // plain `new Outer$1(...)` form is.
-                    && !inner_simple(cls).starts_with(|c: char| c.is_ascii_digit())
+                    // Anonymous classes (digit tails) are emitted as
+                    // separate top-level-ish classes — a qualified
+                    // `this.new 1(...)` is not valid Java; the flat
+                    // `new Outer$1(...)` form is. Test the RAW tail:
+                    // inner_simple already sanitizes a leading digit to
+                    // `_`, which silently bypassed this guard and emitted
+                    // `this.new _1(..)` against a flat top-level
+                    // declaration (weibo HorseRaceDetector$4 family).
+                    && !cls
+                        .rsplit('$')
+                        .next()
+                        .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false)
                 {
                     // `outerExpr.new Inner(rest...)` — the first ctor arg
                     // is the synthetic outer instance when the class has a
@@ -1167,18 +1175,29 @@ impl<'a> Printer<'a> {
                     out.push(')');
                 } else {
                     out.push_str("new ");
+                    let digit_tail = cls
+                        .rsplit('$')
+                        .next()
+                        .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                        .unwrap_or(false);
+                    // A digit-tail class (anonymous `Outer$1`, d8 lambda)
+                    // is rendered as a SEPARATE top-level file declaring
+                    // `class Outer$1` with the outer instance as an
+                    // ordinary ctor parameter — the ctor signature keeps
+                    // that parameter (the inner-ctor strip excludes
+                    // digit tails for exactly this shape). The member
+                    // form `this.new _1(..)` would look for a member of
+                    // the enclosing class that does not exist there —
+                    // the flat `new Outer$1(outer, ..)` with ALL args is
+                    // the shape that matches the declaration.
                     let member_this = self.is_member_inner(cls)
+                        && !digit_tail
                         && !args.is_empty()
                         && matches!(args[0], Expr::This);
                     let shown = if member_this {
                         // `new Inner()` from inside the outer class
                         inner_simple(cls)
-                    } else if cls
-                        .rsplit('$')
-                        .next()
-                        .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
-                        .unwrap_or(false)
-                    {
+                    } else if digit_tail {
                         // Digit-suffixed class at a `new` site: a d8/R8-
                         // desugared lambda (`...$lambda$N$$inlined$log$1`,
                         // `Outer$$ExternalSyntheticLambda0`) or an anonymous
@@ -1510,6 +1529,39 @@ impl<'a> Printer<'a> {
                         .as_deref()
                         .is_some_and(|o| !is_this_expr(o) && !matches!(o, Expr::This));
                     if lost_alloc {
+                        // A member-inner construction call carries the
+                        // synthetic outer as args[0] and the emitted
+                        // ctor signature drops it (the inner-ctor
+                        // normalization) — supply it implicitly with the
+                        // qualified-new form, mirroring the New-expr
+                        // branches. Digit-tail classes keep the flat
+                        // full-args form (their ctor declares the
+                        // outer parameter).
+                        let digit_tail = cls
+                            .rsplit('$')
+                            .next()
+                            .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                            .unwrap_or(false);
+                        if self.is_member_inner(cls)
+                            && !digit_tail
+                            && !args.is_empty()
+                            && !matches!(args[0], Expr::Const(_))
+                        {
+                            if matches!(args[0], Expr::This) || is_this_expr(&args[0]) {
+                                out.push_str("this.new ");
+                            } else {
+                                self.expr(&args[0], 15, out);
+                                out.push_str(".new ");
+                            }
+                            out.push_str(&inner_simple(cls));
+                            out.push('(');
+                            match self.ctor_param_types(cls, 1, args.len() - 1, &args[1..]) {
+                                Some(pt) => self.args_typed(&args[1..], &pt, out),
+                                None => self.args(&args[1..], out),
+                            }
+                            out.push(')');
+                            return;
+                        }
                         out.push_str("new ");
                         out.push_str(&self.shorten(cls));
                         out.push('(');
