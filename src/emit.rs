@@ -1379,7 +1379,7 @@ impl<'a> Printer<'a> {
                     } else if matches!(
                         o.type_ref().erased(),
                         crate::types::JavaType::Object(ref n) if n.as_ref() == "java/lang/Object"
-                    ) && cls != "java/lang/Object" {
+                    ) && cls.as_ref() != "java/lang/Object" {
                         // Receiver widened to Object (when-materialization
                         // residue): the field cannot resolve on Object —
                         // cast to the declaring class, the same honest
