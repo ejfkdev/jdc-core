@@ -3155,6 +3155,13 @@ impl<'a> Printer<'a> {
 }
 
 fn inner_simple(cls: &str) -> String {
+    // Apply the class-rename registry FIRST: a renamed nested class must
+    // print its display tail at `outer.new Inner(..)` sites too — this
+    // free function was the one emit-side path bypassing the registry
+    // (round-55: declarations carried the rename while `this.new b()`
+    // printed the raw tail → cannot-find).
+    let cow = crate::rename::apply_class_rename(cls);
+    let cls: &str = &cow;
     let last = cls.rsplit('/').next().unwrap_or(cls);
     // R8 leaves class names ending in `$` (rimet's `ThreadMsg$$$`):
     // the last `$`-segment is EMPTY — fall back to the whole simple
