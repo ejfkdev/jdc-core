@@ -315,6 +315,11 @@ pub enum Expr {
         cls: std::sync::Arc<str>,
         ty: TypeRef,
         args: Vec<Expr>,
+        /// Formal parameter types from the folded `<init>` descriptor —
+        /// the ctor's ground truth for argument-position repairs when
+        /// the class is NOT in the pool (framework ctors like
+        /// `new Byte(b)`). Empty for raw/unfolded news.
+        arg_tys: Vec<JavaType>,
         /// true if this is a raw `new` whose `<init>` hasn't been folded yet.
         raw: bool,
     },

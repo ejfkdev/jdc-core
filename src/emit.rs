@@ -3161,7 +3161,23 @@ impl<'a> Printer<'a> {
                     .replace('$', ".")
             };
             let first = simple.split('.').next().unwrap_or(simple.as_str());
-            if !shadowed(first) {
+            // Member-type shadow: the emitting class's OWN nested type
+            // with the same simple name captures the bare render
+            // (member types outrank same-package types in class scope) —
+            // weibo PhoneInfoUtils: `b2.b(ctx,..)` for sibling class
+            // com/weibo/ssosdk/b2 bound to nested PhoneInfoUtils$b2
+            // (找不到符号 方法 b). The reference to the twin itself (or
+            // its own nestees) keeps the simple form. FQN fallback is
+            // unambiguous — no field/variable can shadow a dotted
+            // package chain past its first segment.
+            let twin = format!("{}${}", self.ctx.class_name(), first);
+            let is_twin_ref = internal == twin || internal.starts_with(&format!("{twin}$"));
+            // The twin may exist only as a DISPLAY (a rename rule minted
+            // `Outer$b2` from `Outer$b`) — the registry's reverse index
+            // knows; the pool does not.
+            let twin_exists =
+                self.ctx.has_class(&twin) || crate::rename::is_renamed_display(&twin);
+            if !shadowed(first) && (is_twin_ref || !twin_exists) {
                 return simple;
             }
         }
