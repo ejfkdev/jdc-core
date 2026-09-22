@@ -28,6 +28,10 @@ static REVERSE: OnceLock<HashMap<String, String>> = OnceLock::new();
 /// allocation on the (rare) collision-hit path.
 static FIELD_RENAMES: OnceLock<HashMap<std::sync::Arc<str>, Vec<FieldRename>>> = OnceLock::new();
 static FIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Owners with at least one rename — hot paths (every lifted field/invoke
+/// ref) probe this set instead of rebuilding descriptors for the whole
+/// corpus when the registry is active for a handful of classes.
+static FIELD_OWNERS: OnceLock<std::collections::HashSet<std::sync::Arc<str>>> = OnceLock::new();
 
 /// One renamed field of one owner class.
 pub struct FieldRename {
@@ -41,8 +45,23 @@ pub struct FieldRename {
 pub fn set_field_renames(map: HashMap<std::sync::Arc<str>, Vec<FieldRename>>) {
     if !map.is_empty() {
         FIELD_ACTIVE.store(true, Ordering::Relaxed);
+        let _ = FIELD_OWNERS.set(
+            map.iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, _)| k.clone())
+                .collect(),
+        );
     }
     let _ = FIELD_RENAMES.set(map);
+}
+
+/// Does this owner class have ANY renamed member? One hash probe; the
+/// lift-time field/method ref paths skip descriptor reconstruction
+/// entirely for the (overwhelming majority of) untouched owners.
+#[inline]
+pub fn owner_has_renames(owner: &str) -> bool {
+    FIELD_ACTIVE.load(Ordering::Relaxed)
+        && FIELD_OWNERS.get().is_some_and(|s| s.contains(owner))
 }
 
 /// Fast probe: is the member-rename registry non-empty? Callers on hot
