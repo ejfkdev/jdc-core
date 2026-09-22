@@ -1365,13 +1365,25 @@ impl<'a> Printer<'a> {
                     }
                     out.push_str(".length");
                 } else if let Some(o) = owner {
-                    if let Expr::Const(_) = o.as_ref() {
-                        // Receiver tracking lost (a null placeholder leaked
-                        // through): `0.b` is not parseable — the same
-                        // cast-null form the Method arm uses.
-                        out.push_str("((");
-                        out.push_str(&self.shorten(cls));
-                        out.push_str(") null).");
+                    if let Expr::Const(cv) = o.as_ref() {
+                        if matches!(
+                            cv,
+                            crate::ir::expr::ConstVal::Str(_)
+                                | crate::ir::expr::ConstVal::ClassLit(_)
+                        ) {
+                            // Literal receivers keep their value (see the
+                            // Method arm): `Foo.class.name`, not
+                            // `((Class) null).name`.
+                            self.expr(o, 15, out);
+                            out.push('.');
+                        } else {
+                            // Receiver tracking lost (a null placeholder leaked
+                            // through): `0.b` is not parseable — the same
+                            // cast-null form the Method arm uses.
+                            out.push_str("((");
+                            out.push_str(&self.shorten(cls));
+                            out.push_str(") null).");
+                        }
                         out.push_str(&java_ident(name));
                     } else if matches!(o.as_ref(), Expr::Raw(t) if t == "\u{3}") {
                         // Outer anonymous class member: unqualified lexical
@@ -1672,15 +1684,33 @@ impl<'a> Printer<'a> {
                         }
                         out.push_str("super.");
                     } else if let Some(o) = owner {
-                        if let Expr::Const(_) = o.as_ref() {
-                            // Receiver tracking lost: a null placeholder
-                            // (const/4 0) leaked through as the receiver —
-                            // `0.close()` is not parseable. Cast-null keeps
-                            // the statement compilable and honestly marks
-                            // the value as unknown on this path.
-                            out.push_str("((");
-                            out.push_str(&self.shorten(cls));
-                            out.push_str(") null).");
+                        if let Expr::Const(cv) = o.as_ref() {
+                            if matches!(
+                                cv,
+                                crate::ir::expr::ConstVal::Str(_)
+                                    | crate::ir::expr::ConstVal::ClassLit(_)
+                            ) {
+                                // A literal receiver is valid, faithful
+                                // Java (`"http".equalsIgnoreCase(x)`,
+                                // `Foo.class.getName()`). Rendering it as
+                                // cast-null silently DROPPED the constant
+                                // — 73.5k sites across the 4 corpora
+                                // (`((String) null).m()`), invisible to
+                                // javac (it compiles) and an NPE at run
+                                // time. Only valueless placeholders take
+                                // the cast-null path below.
+                                self.expr(o, 15, out);
+                                out.push('.');
+                            } else {
+                                // Receiver tracking lost: a null placeholder
+                                // (const/4 0) leaked through as the receiver —
+                                // `0.close()` is not parseable. Cast-null keeps
+                                // the statement compilable and honestly marks
+                                // the value as unknown on this path.
+                                out.push_str("((");
+                                out.push_str(&self.shorten(cls));
+                                out.push_str(") null).");
+                            }
                         } else if let Expr::Lambda(l) = o.as_ref() {
                             // A lambda RECEIVER needs the source's SAM cast
                             // (`((BooleanSupplier) () -> ..).getAsBoolean()`
