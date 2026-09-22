@@ -2993,6 +2993,11 @@ impl<'a> Printer<'a> {
         if internal.is_empty() {
             return String::new();
         }
+        // An import-resolved obscured reference renders its simple name
+        // (the qualified form binds to an in-scope class — JLS 6.4.2).
+        if let Some(simple) = self.ctx.obscured_simple(internal) {
+            return simple;
+        }
         // Case-collision renames (`X/Cua` → `X/Cua_2`): the registry is
         // empty for ordinary corpora — one relaxed atomic load.
         let cow = crate::rename::apply_class_rename(internal);
@@ -3148,6 +3153,13 @@ impl<'a> Printer<'a> {
     }
 
     fn java_type_name(&self, t: &JavaType) -> String {
+        // An import-resolved obscured class renders its simple name in
+        // every type position (signatures, casts, type refs).
+        if let JavaType::Object(c) = t {
+            if let Some(simple) = self.ctx.obscured_simple(c) {
+                return simple;
+            }
+        }
         match t {
             JavaType::Object(n) => self.shorten(n),
             JavaType::Array(inner) => format!("{}[]", self.java_type_name(inner)),

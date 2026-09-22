@@ -80,6 +80,17 @@ pub trait Ctx {
         52
     }
 
+    /// The front-end's render-time import map: when a referenced
+    /// internal name is OBSCURED in the current compilation unit (its
+    /// qualified form's first segment binds to an in-scope class name
+    /// — JLS 6.4.2), the front-end emits a single-type import for it
+    /// and the render must use the SIMPLE name. Returns the simple
+    /// name when so; `None` renders normally. Default None (no import
+    /// machinery).
+    fn obscured_simple(&self, _internal: &str) -> Option<String> {
+        None
+    }
+
     /// Identity of the backing container (pool), for caches keyed on
     /// pool-dependent pure queries (`Printer::shorten` memoization).
     /// Default 0 is safe only for single-pool processes; multi-pool
