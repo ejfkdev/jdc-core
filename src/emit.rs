@@ -63,6 +63,14 @@ pub struct Printer<'a> {
     /// `byte normalVirtual = cond ? 5 : 9;`).
     pub ret_byte: bool,
     pub ret_short: bool,
+    /// Memoized twin-exists probe for the same-package member-shadow
+    /// check, keyed by first segment (class_name is constant per ctx;
+    /// shared with sub-printers). The chain-walk does up to 4 registry
+    /// lookups per level — per-call that cost ~30% on weixin; per
+    /// distinct segment it is amortized to nothing.
+    twin_cache: std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<String, bool>>,
+    >,
 }
 
 impl<'a> Printer<'a> {
@@ -84,6 +92,9 @@ impl<'a> Printer<'a> {
             ret_char: false,
             ret_byte: false,
             ret_short: false,
+            twin_cache: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -1008,6 +1019,7 @@ impl<'a> Printer<'a> {
             in_cond: self.in_cond,
             lambda_sam_ret: self.lambda_sam_ret.clone(),
             ret_sam: self.ret_sam.clone(),
+            twin_cache: self.twin_cache.clone(),
         }
     }
 
@@ -2774,6 +2786,7 @@ impl<'a> Printer<'a> {
                             in_cond: false,
                             lambda_sam_ret: None,
                             ret_sam: None,
+                            twin_cache: self.twin_cache.clone(),
                         };
                         if let Some(e) = single_expr {
                             if l.sam_desc.ret == crate::types::JavaType::Boolean {
@@ -3209,13 +3222,72 @@ impl<'a> Printer<'a> {
             // its own nestees) keeps the simple form. FQN fallback is
             // unambiguous — no field/variable can shadow a dotted
             // package chain past its first segment.
-            let twin = format!("{}${}", self.ctx.class_name(), first);
-            let is_twin_ref = internal == twin || internal.starts_with(&format!("{twin}$"));
-            // The twin may exist only as a DISPLAY (a rename rule minted
-            // `Outer$b2` from `Outer$b`) — the registry's reverse index
-            // knows; the pool does not.
-            let twin_exists =
-                self.ctx.has_class(&twin) || crate::rename::is_renamed_display(&twin);
+            // Member-type twin shadow: a nested type of ANY enclosing
+            // level whose display simple name equals `first` captures
+            // the bare render (member types outrank same-package types
+            // in class scope — weixin d2's `((w1) h0)` bound to nested
+            // d2$$w1, not sibling viewitems/w1: 1,045 h0→w1 lines).
+            // Walk the `$`-chain of the emitting class (the ctx may be a
+            // nested `d2$$c`, whose lexical scope still sees d2's
+            // members); R8 orphans use `$$`, normalization displays use
+            // `$`, and rename displays live only in the registry's
+            // reverse index — check all four shapes per level.
+            let twin_exists = {
+                // The borrow temp must die before the else arm's
+                // borrow_mut (if-let scrutinee temps live across the
+                // whole statement — RefCell double-borrow panic).
+                let cached = self.twin_cache.borrow().get(first).copied();
+                if let Some(v) = cached {
+                    v
+                } else {
+                    let mut v = false;
+                    let mut cur: &str = self.ctx.class_name();
+                    loop {
+                        let t1 = format!("{cur}${first}");
+                        let t2 = format!("{cur}$${first}");
+                        if self.ctx.has_class(&t1)
+                            || self.ctx.has_class(&t2)
+                            || crate::rename::is_renamed_display(&t1)
+                            || crate::rename::is_renamed_display(&t2)
+                        {
+                            v = true;
+                            break;
+                        }
+                        match cur.rfind('$') {
+                            Some(i) => cur = &cur[..i],
+                            None => break,
+                        }
+                    }
+                    self.twin_cache
+                        .borrow_mut()
+                        .insert(first.to_string(), v);
+                    v
+                }
+            };
+            // is_twin_ref only matters when a twin exists (otherwise
+            // `!twin_exists` already grants the simple form) — keep it
+            // off the hot path.
+            let is_twin_ref = twin_exists && {
+                let mut r = false;
+                let mut cur: &str = self.ctx.class_name();
+                loop {
+                    let t1 = format!("{cur}${first}");
+                    let t2 = format!("{cur}$${first}");
+                    if internal == t1
+                        || internal == t2
+                        || internal.starts_with(&format!("{t1}$"))
+                        || internal.starts_with(&format!("{t2}$"))
+                    {
+                        r = true;
+                        break;
+                    }
+                    match cur.rfind('$') {
+                        Some(i) => cur = &cur[..i],
+                        None => break,
+                    }
+                }
+                r
+            };
             if !shadowed(first) && (is_twin_ref || !twin_exists) {
                 return simple;
             }
