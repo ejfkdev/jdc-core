@@ -1407,14 +1407,29 @@ impl<'a> Printer<'a> {
                         }
                         out.push_str(").");
                         out.push_str(&java_ident(name));
-                    } else if matches!(
-                        o.type_ref().erased(),
-                        crate::types::JavaType::Object(ref n) if n.as_ref() == "java/lang/Object"
-                    ) && cls.as_ref() != "java/lang/Object" {
-                        // Receiver widened to Object (when-materialization
-                        // residue): the field cannot resolve on Object —
-                        // cast to the declaring class, the same honest
-                        // cast the Method arm uses.
+                    } else if match o.type_ref().erased() {
+                        crate::types::JavaType::Object(ref n) => {
+                            n.as_ref() != cls.as_ref()
+                                && !matches!(o.as_ref(), Expr::Raw(_) | Expr::RawT(..) | Expr::This)
+                                && (n.as_ref() == "java/lang/Object"
+                                    || self.ctx.is_subtype_of(
+                                        &crate::types::JavaType::Object(
+                                            std::sync::Arc::from(cls.as_ref()),
+                                        ),
+                                        n,
+                                    ))
+                        }
+                        _ => false,
+                    } {
+                        // The receiver's static type is a strict SUPERTYPE
+                        // of the declaring class: either widened to Object
+                        // (when-materialization residue) or a register
+                        // reuse the vt kept at the supertype (`v9.label`
+                        // with v9: ContinuationImpl, label on the suspend
+                        // frame subclass — weibo coroutine cluster ×1.3k).
+                        // The downcast is what the bytecode's field
+                        // resolution did; same honest cast as the Method
+                        // arm.
                         out.push_str("((");
                         out.push_str(&self.shorten(cls));
                         out.push_str(") ");
@@ -1484,12 +1499,17 @@ impl<'a> Printer<'a> {
                         // concrete `$N` name — `$` and digits are legal
                         // Java identifier characters, and the holder
                         // always sits in the referring class's package.
-                        let rendered = self.shorten(cls);
-                        if rendered == "Object" && cls.as_ref() != "java/lang/Object" {
-                            out.push_str(&self.shorten_concrete(cls));
-                        } else {
-                            out.push_str(&rendered);
-                        }
+                        // The qualifier of a STATIC member is always the
+                        // CONCRETE name: anon/lambda classes emit as flat
+                        // `$`-named top-level files, while shorten()'s
+                        // anon fallback renders the SAM interface — which
+                        // does not declare the member. `Function0.INSTANCE`
+                        // (1.7k weibo lines) is the sget of
+                        // ActivityResultRegistry$generateRandomNumber$1
+                        // .INSTANCE; the same trap took $SwitchMap holders
+                        // to `Object.` before (the narrow rendered=="Object"
+                        // check this replaces).
+                        out.push_str(&self.shorten_concrete(cls));
                         out.push('.');
                     }
                     out.push_str(&java_ident(name));
@@ -1797,7 +1817,10 @@ impl<'a> Printer<'a> {
                                 !shadow
                             };
                         if !enclosing_static {
-                            out.push_str(&self.shorten(cls));
+                            // Concrete name: same anon-class trap as the
+                            // static FIELD qualifier (the SAM interface
+                            // does not declare the synthetic static).
+                            out.push_str(&self.shorten_concrete(cls));
                             out.push('.');
                         }
                     } else if !type_args.is_empty() {
@@ -2956,6 +2979,22 @@ impl<'a> Printer<'a> {
                 .collect::<String>(),
             desc.ret.to_descriptor()
         );
+        // The receiver's static type is a strict SUPERTYPE of the
+        // resolved class (register reuse left the vt at the supertype):
+        // the member lives on `cls`, and the downcast is exactly what
+        // the bytecode's resolution performed. ONLY when the owner type
+        // cannot resolve the member itself: an interface-typed owner
+        // whose IMPL the dex named resolves fine through the
+        // interface, and casting to the impl sprinkles obscured/flat
+        // impl names into expression position (weixin +3.3k
+        // cannot-find when this fired unguarded).
+        if self.ctx.is_subtype_of(
+            &crate::types::JavaType::Object(std::sync::Arc::from(cls)),
+            on.as_ref(),
+        ) && self.ctx.method_flags(on.as_ref(), name, &want).is_none()
+        {
+            return true;
+        }
         let Some(acc) = self.ctx.method_flags(cls, name, &want) else {
             return false;
         };
