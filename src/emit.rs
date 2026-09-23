@@ -3071,6 +3071,42 @@ impl<'a> Printer<'a> {
         sanitize_source_name(&self.shorten_inner(internal, false))
     }
 
+    /// Nesting-aware display chain: a `$` boundary dots ONLY when the
+    /// prefix has a resolvable outer (a true member); when the prefix
+    /// is itself an emission-unit top-level (R8 deleted the outer —
+    /// weixin matrix `JiffiesMonitorFeature` gone, `$JiffiesSnapshot`
+    /// survives as a flat file), its `$` stays and the member tail dots
+    /// onto it: `...JiffiesMonitorFeature$JiffiesSnapshot.ThreadJiffiesEntry`.
+    /// Blind `$`→`.` rendered a chain through the missing type
+    /// ("是在不可访问的类或接口中定义的").
+    fn nested_display(&self, internal: &str) -> String {
+        if let Some(o) = self.ctx.find_outer(internal) {
+            if internal.len() > o.len() + 1 && internal.starts_with(&o) {
+                let tail = &internal[o.len() + 1..];
+                if !tail.is_empty() && !tail.starts_with('$') && !tail.contains('/') {
+                    // The tail may span several member levels
+                    // (`a17$a18`): below a RESOLVED outer they are all
+                    // inline members of the family file — dot them.
+                    return format!(
+                        "{}.{}",
+                        self.nested_display(&o),
+                        tail.replace('$', ".")
+                    );
+                }
+            }
+        }
+        // Base: a POOL class with no resolvable outer is a flat `$`-named
+        // emission unit — keep the `$` (its file name carries it). An
+        // off-pool name is a framework member class (android.jar's
+        // `LinearLayout$LayoutParams`) — dot it like the old blind
+        // replace; the jar declares it as a member.
+        if self.ctx.has_class(internal) {
+            internal.replace('/', ".")
+        } else {
+            internal.replace(['/', '$'], ".")
+        }
+    }
+
     fn shorten_inner(&self, internal: &str, anon_fallback: bool) -> String {
         if internal.is_empty() {
             return String::new();
@@ -3206,11 +3242,12 @@ impl<'a> Printer<'a> {
             let simple = if keep_dollar {
                 internal.rsplit('/').next().unwrap_or(internal).to_string()
             } else {
-                internal
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(internal)
-                    .replace('$', ".")
+                let d = self.nested_display(internal);
+                let pkg_dotted = pkg_of(internal).replace('/', ".");
+                d.strip_prefix(&pkg_dotted)
+                    .and_then(|r| r.strip_prefix('.'))
+                    .map(str::to_string)
+                    .unwrap_or(d)
             };
             let first = simple.split('.').next().unwrap_or(simple.as_str());
             // Member-type shadow: the emitting class's OWN nested type
@@ -3295,7 +3332,7 @@ impl<'a> Printer<'a> {
         if keep_dollar {
             dotted
         } else {
-            dotted.replace('$', ".")
+            self.nested_display(internal)
         }
     }
 
