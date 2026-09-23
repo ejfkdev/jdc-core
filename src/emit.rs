@@ -3107,6 +3107,45 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Walk the MEMBER-TYPE scope of the emitting class: every lexical
+    /// `$`-outer level, and at each level its superclass chain and direct
+    /// interfaces — JLS 8.1.6: member types are INHERITED into scope, so
+    /// a superclass's nested `a` captures the bare simple name `a` exactly
+    /// like an own nestee (weixin pk4.d extends k0: same-package class ref
+    /// `a.d` bound to inherited k0$a — "找不到符号 变量 d, 位置: 类 a").
+    /// `f` is called with each in-scope class's internal name; the walk
+    /// stops early when `f` returns true.
+    fn scope_member_walk<F: FnMut(&str) -> bool>(&self, f: &mut F) -> bool {
+        let mut cur: &str = self.ctx.class_name();
+        loop {
+            let mut stack: Vec<String> = vec![cur.to_string()];
+            let mut seen: crate::FxHashSet<String> = crate::FxHashSet::default();
+            while let Some(c) = stack.pop() {
+                if !seen.insert(c.clone()) {
+                    continue;
+                }
+                if f(&c) {
+                    return true;
+                }
+                if let Some((ifaces, sup)) = self.ctx.class_bases(&c) {
+                    for i in ifaces {
+                        stack.push(i);
+                    }
+                    if let Some(s) = sup {
+                        if s != "java/lang/Object" {
+                            stack.push(s);
+                        }
+                    }
+                }
+            }
+            match cur.rfind('$') {
+                Some(i) => cur = &cur[..i],
+                None => break,
+            }
+        }
+        false
+    }
+
     fn shorten_inner(&self, internal: &str, anon_fallback: bool) -> String {
         if internal.is_empty() {
             return String::new();
@@ -3277,24 +3316,16 @@ impl<'a> Printer<'a> {
                 if let Some(v) = cached {
                     v
                 } else {
-                    let mut v = false;
-                    let mut cur: &str = self.ctx.class_name();
-                    loop {
-                        let t1 = format!("{cur}${first}");
-                        let t2 = format!("{cur}$${first}");
-                        if self.ctx.has_class(&t1)
+                    // Own nestees AND inherited member types (the scope
+                    // walk) capture the bare simple name alike.
+                    let v = self.scope_member_walk(&mut |c| {
+                        let t1 = format!("{c}${first}");
+                        let t2 = format!("{c}$${first}");
+                        self.ctx.has_class(&t1)
                             || self.ctx.has_class(&t2)
                             || crate::rename::is_renamed_display(&t1)
                             || crate::rename::is_renamed_display(&t2)
-                        {
-                            v = true;
-                            break;
-                        }
-                        match cur.rfind('$') {
-                            Some(i) => cur = &cur[..i],
-                            None => break,
-                        }
-                    }
+                    });
                     self.twin_cache
                         .borrow_mut()
                         .insert(first.to_string(), v);
@@ -3304,27 +3335,15 @@ impl<'a> Printer<'a> {
             // is_twin_ref only matters when a twin exists (otherwise
             // `!twin_exists` already grants the simple form) — keep it
             // off the hot path.
-            let is_twin_ref = twin_exists && {
-                let mut r = false;
-                let mut cur: &str = self.ctx.class_name();
-                loop {
-                    let t1 = format!("{cur}${first}");
-                    let t2 = format!("{cur}$${first}");
-                    if internal == t1
+            let is_twin_ref = twin_exists
+                && self.scope_member_walk(&mut |c| {
+                    let t1 = format!("{c}${first}");
+                    let t2 = format!("{c}$${first}");
+                    internal == t1
                         || internal == t2
                         || internal.starts_with(&format!("{t1}$"))
                         || internal.starts_with(&format!("{t2}$"))
-                    {
-                        r = true;
-                        break;
-                    }
-                    match cur.rfind('$') {
-                        Some(i) => cur = &cur[..i],
-                        None => break,
-                    }
-                }
-                r
-            };
+                });
             if !shadowed(first) && (is_twin_ref || !twin_exists) {
                 return simple;
             }
