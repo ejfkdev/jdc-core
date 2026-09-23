@@ -464,7 +464,7 @@ impl<'a> Printer<'a> {
                 if *is_final {
                     line.push_str("final ");
                 }
-                line.push_str(&self.type_name(&info.ty));
+                line.push_str(&self.local_decl_ty(*var, &info.ty));
                 line.push(' ');
                 line.push_str(&java_ident(&info.name));
                 if let Some(e) = init {
@@ -984,7 +984,7 @@ impl<'a> Printer<'a> {
             }
             Stmt::LocalDef { var, init, .. } => {
                 let info = self.vt.var(*var);
-                out.push_str(&self.type_name(&info.ty));
+                out.push_str(&self.local_decl_ty(*var, &info.ty));
                 out.push(' ');
                 out.push_str(&java_ident(&info.name));
                 if let Some(e) = init {
@@ -3344,6 +3344,21 @@ impl<'a> Printer<'a> {
                 self.generic_name(g)
             }
         }
+    }
+
+    /// Declared-type name for a local: normally `type_name` (which lets a
+    /// `$<digits>` class fall back to its SAM interface for phi-friendly
+    /// readability), but a var in `force_concrete_vars` keeps its concrete
+    /// binary name so concrete-member accesses (`v.L$0`, the Kotlin
+    /// coroutine capture fields) resolve — interfaces have no instance
+    /// fields.
+    fn local_decl_ty(&self, var: u32, ty: &TypeRef) -> String {
+        if self.vt.force_concrete_vars.contains(&var) {
+            if let TypeRef::J(JavaType::Object(cls)) = ty {
+                return sanitize_source_name(&self.shorten_concrete(cls));
+            }
+        }
+        self.type_name(ty)
     }
 
     fn java_type_name(&self, t: &JavaType) -> String {

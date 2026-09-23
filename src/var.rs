@@ -39,6 +39,16 @@ pub struct VarTable {
     /// generic/plain-Object value); they must stay Object so every branch
     /// assignment type-checks. Evidence inference may not narrow them.
     pub wide_stack_vars: HashSet<u32>,
+    /// Variables whose declared type must render as the CONCRETE class
+    /// (via `shorten_concrete`), NOT the anonymous-class → SAM-interface
+    /// fallback. A `$<digits>` desugared/suspend-lambda local that owns a
+    /// non-static FIELD access (`v.L$0 = obj`, the Kotlin coroutine
+    /// capture fields) needs its concrete type: interfaces carry no
+    /// instance fields, so `Function2 v; v.L$0` is "找不到符号 变量 L$0".
+    /// Set by the front-end for single-concrete-typed field owners; the
+    /// phi case is excluded because a disagreed merge stays Object (in
+    /// `wide_stack_vars`), never a specific concrete class.
+    pub force_concrete_vars: HashSet<u32>,
     /// Exception-table handler start pcs: an LVT range beginning at one
     /// (or at its astore + 1/2) is a catch parameter binding. Such
     /// ranges never receive forward store attribution — a store just
