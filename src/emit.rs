@@ -3288,13 +3288,19 @@ impl<'a> Printer<'a> {
             })
         };
         let simple_here = internal.rsplit('/').next().unwrap_or(internal).to_string();
-        // Hyphenated synthetic names (Kotlin's `-IA` internal-abstraction
-        // ctor markers: `org/a/c/c$1-IA`) are not source identifiers and
-        // can never be nested members or local classes — they emit as
-        // FLAT sanitized files (`c$1_IA.java`), so references must render
-        // the same flat sanitized full name. The local-class digit-strip
-        // path mangled them (`1-IA` → `-IA` → `_IA`, weibo ×157).
-        if simple_here.contains('-') {
+        // Identifier-unsafe characters ANYWHERE in the name (Kotlin's
+        // `-IA`/`-EL` hyphen markers: `org/a/c/c$1-IA`; R8 unicode
+        // obfuscation: the Thai/Yi/Syriac classes of bin.mt.plus,
+        // ejfkdev/ddc#4) are not source identifiers and can never be
+        // nested members or local classes — they emit as FLAT sanitized
+        // files, so references must render the same sanitized full name
+        // (`_u<hex>` escapes on BOTH sides). The local-class digit-strip
+        // path mangled them (`1-IA` → `-IA` → `_IA`, weibo ×157), and a
+        // raw-unicode ref never resolves against the escaped decl.
+        if !internal
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '/')
+        {
             return sanitize_source_name(&internal.replace('/', "."));
         }
         // d8's synthetic outline/lambda/backport classes
@@ -3807,58 +3813,71 @@ fn is_statement_expr(e: &Expr) -> bool {
 
 pub fn sanitize_source_name(name: &str) -> String {
     // Obfuscators emit classes named `if`/`do`, PACKAGES named `do`
-    // (weixin `package do;`) and `..badge.new..` paths (qq), and
-    // WhatsApp nests digit-start simple names under one-letter packages
-    // (`X/0Xx`). EVERY `.`-segment that cannot START a Java identifier
-    // maps to `_<seg>`; `$`-attached tails (`RequestId$1`, `X$0Xx`) are
-    // legal as-is once their leading segment is clean.
-    let bad_char = !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.');
+    // (weixin `package do;`) and `..badge.new..` paths (qq), WhatsApp
+    // nests digit-start simple names (`X/0Xx`), Kotlin mints hyphenated
+    // synthetic markers (`c$1-IA`, `Collection$-EL`) and R8 hardening
+    // even names classes in Thai/Yi/Syriac code points (bin.mt.plus —
+    // ejfkdev/ddc#4). EVERY identifier-unsafe character escapes to
+    // `_u<hex>` per code point, then identifier-position repairs apply.
+    // Byte-for-byte the mapping the DECLARATION side uses (ddc
+    // `classdec::sanitize_fq_seg`): declaration, file name and every
+    // reference must agree, and the escape must be INJECTIVE — the old
+    // fold-everything-to-`_` mapping collapsed 22,636 distinct classes
+    // onto 3 file names.
     let segs: Vec<&str> = name.split('.').collect();
-    let needs = bad_char
-        || segs.iter().any(|seg| {
+    let clean = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+        && segs.iter().all(|seg| {
             let first = seg.chars().next().unwrap_or('a');
-            is_java_keyword(seg) || is_restricted_type_name(seg) || first.is_ascii_digit()
+            !is_java_keyword(seg)
+                && !is_restricted_type_name(seg)
+                && !first.is_ascii_digit()
+                && *seg != "_"
         });
-    if !needs {
+    if clean {
         return name.to_string();
     }
     segs.iter()
-        .map(|seg| {
-            let first = seg.chars().next().unwrap_or('a');
-            let fixed = if is_java_keyword(seg) || is_restricted_type_name(seg) || first.is_ascii_digit() {
-                format!("_{seg}")
-            } else {
-                seg.to_string()
-            };
-            if fixed
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-            {
-                fixed
-            } else {
-                // Non-ASCII single chars map to a lone `_` — reserved
-                // since Java 9. Escape it (declaration/ref consistency).
-                let mapped: String = fixed
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                if mapped == "_" {
-                    "__".to_string()
-                } else {
-                    mapped
-                }
-            }
-        })
+        .copied()
+        .map(sanitize_ident_seg)
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// One identifier segment: escape every ident-unsafe character as
+/// `_u<hex>`, then repair identifier positions (keyword / restricted
+/// type name / digit start gain a leading `_`; the lone `_` reserved
+/// since Java 9 becomes `__`). Mirrors ddc `sanitize_fq_seg` exactly.
+fn sanitize_ident_seg(seg: &str) -> String {
+    let plain = seg
+        .chars()
+        .all(|c| c.is_ascii() && (c.is_ascii_alphanumeric() || c == '_' || c == '$'));
+    let mut out = if plain {
+        seg.to_string()
+    } else {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(seg.len() + 8);
+        for c in seg.chars() {
+            if c.is_ascii() && (c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+                s.push(c);
+            } else {
+                s.push_str("_u");
+                let _ = write!(s, "{:x}", c as u32);
+            }
+        }
+        s
+    };
+    if is_java_keyword(&out)
+        || is_restricted_type_name(&out)
+        || out.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        out.insert(0, '_');
+    }
+    if out == "_" {
+        out = "__".to_string();
+    }
+    out
 }
 
 pub fn escape_string(s: &str) -> String {
