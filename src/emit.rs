@@ -22,6 +22,11 @@ pub struct Printer<'a> {
     /// collided with the METHOD-level `i$` — the depth-1 rename only
     /// consulted depth-1's vt, 已在方法中定义了变量 i$).
     outer_names: Vec<String>,
+    /// Sequence for unbound catch parameters (`ignored`, `ignored2`, …):
+    /// two catch scopes can NEST (a try inside a catch body) and javac
+    /// rejects duplicate names across overlapping scopes ("已在方法
+    /// invokeSuspend(Object)中定义了变量 ignored", weixin hl5/m ×56).
+    ignored_seq: u32,
     /// True when the enclosing method returns boolean.
     /// Reused per-statement line buffer (millions of statements: the
     /// fresh-String-per-line pattern re-allocated and re-grew each time).
@@ -82,6 +87,7 @@ impl<'a> Printer<'a> {
             indent: 0,
             lambda_depth: 0,
             outer_names: Vec::new(),
+            ignored_seq: 0,
             line_buf: String::new(),
             ret_bool: false,
             suppress_poly_cast: false,
@@ -293,6 +299,33 @@ impl<'a> Printer<'a> {
 
     // ---------------- statements ----------------
 
+
+    /// Unique name for an unbound catch parameter; bound ones take
+    /// their recorded/var-table name. Uniqueness covers the printer's
+    /// own sequence, the var table and every enclosing-scope name the
+    /// lambda chain accumulated (a lambda body may not redeclare a
+    /// name visible outside it).
+    fn catch_var_name(&mut self, c: &crate::ir::stmt::Catch) -> String {
+        if c.var != u32::MAX {
+            return c
+                .var_name
+                .clone()
+                .unwrap_or_else(|| self.vt.var(c.var).name.clone());
+        }
+        loop {
+            self.ignored_seq += 1;
+            let name = if self.ignored_seq == 1 {
+                "ignored".to_string()
+            } else {
+                format!("ignored{}", self.ignored_seq)
+            };
+            let clash = self.vt.vars.iter().any(|v| v.name == name)
+                || self.outer_names.iter().any(|n| *n == name);
+            if !clash {
+                return name;
+            }
+        }
+    }
     fn line(&mut self, s: &str) {
         self.push_indent();
         self.out.push_str(s);
@@ -734,13 +767,7 @@ impl<'a> Printer<'a> {
                             .collect::<Vec<_>>()
                             .join(" | ")
                     };
-                    let var_name = if c.var == u32::MAX {
-                        "ignored".to_string()
-                    } else {
-                        c.var_name
-                            .clone()
-                            .unwrap_or_else(|| self.vt.var(c.var).name.clone())
-                    };
+                    let var_name = self.catch_var_name(c);
                     self.line(&format!("}} catch ({} {}) {{", exc_name, var_name));
                     self.indent += 1;
                     self.stmt(&c.body);
@@ -816,13 +843,7 @@ impl<'a> Printer<'a> {
                             .collect::<Vec<_>>()
                             .join(" | ")
                     };
-                    let var_name = if c.var == u32::MAX {
-                        "ignored".to_string()
-                    } else {
-                        c.var_name
-                            .clone()
-                            .unwrap_or_else(|| self.vt.var(c.var).name.clone())
-                    };
+                    let var_name = self.catch_var_name(c);
                     self.line(&format!("}} catch ({} {}) {{", exc_name, var_name));
                     self.indent += 1;
                     self.stmt(&c.body);
@@ -1009,6 +1030,7 @@ impl<'a> Printer<'a> {
             line_buf: String::new(),
             indent: 0,
             lambda_depth: self.lambda_depth,
+            ignored_seq: self.ignored_seq,
             outer_names: self.outer_names.clone(),
             ret_bool: self.ret_bool,
             ret_char: self.ret_char,
@@ -1708,11 +1730,38 @@ impl<'a> Printer<'a> {
                         // invokespecial on `this` targeting another class:
                         // a superclass method call. Interface targets are
                         // qualified `Iface.super.m()` (JDK8 default-method
-                        // invocations from implementors).
+                        // invocations from implementors) — but only a
+                        // DIRECT superinterface may carry the qualifier
+                        // (JLS 15.11.2). A default reached through a
+                        // SUBINTERFACE (weixin jsapi/f0 implements e0
+                        // extends l; `l.super.m()` = "不是封闭类: l" ×67)
+                        // qualifies with the direct interface inheriting
+                        // it; one reached only through the superclass
+                        // chain falls back to plain `super.` (the super
+                        // inherits the default as its own member).
                         let itf = self.ctx.is_interface(cls);
                         if itf {
-                            out.push_str(&self.shorten(cls));
-                            out.push('.');
+                            let mut qual: Option<String> = None;
+                            if let Some((ifs, _)) =
+                                self.ctx.class_bases(self.ctx.class_name())
+                            {
+                                if ifs.iter().any(|i| i.as_str() == cls.as_ref()) {
+                                    qual = Some(cls.to_string());
+                                } else {
+                                    qual = ifs.into_iter().find(|i| {
+                                        self.ctx.is_subtype_of(
+                                            &crate::types::JavaType::Object(
+                                                i.as_str().into(),
+                                            ),
+                                            cls,
+                                        )
+                                    });
+                                }
+                            }
+                            if let Some(q) = qual {
+                                out.push_str(&self.shorten(&q));
+                                out.push('.');
+                            }
                         }
                         out.push_str("super.");
                     } else if let Some(o) = owner {
@@ -2764,6 +2813,7 @@ impl<'a> Printer<'a> {
                             line_buf: String::new(),
                             indent: self.indent,
                             lambda_depth: self.lambda_depth + 1,
+                            ignored_seq: self.ignored_seq,
                             outer_names: {
                                 let mut n = self.outer_names.clone();
                                 n.extend(self.vt.vars.iter().map(|v| v.name.clone()));
