@@ -3185,7 +3185,13 @@ impl<'a> Printer<'a> {
     /// ("是在不可访问的类或接口中定义的").
     fn nested_display(&self, internal: &str) -> String {
         if let Some(o) = self.ctx.find_outer(internal) {
-            if internal.len() > o.len() + 1 && internal.starts_with(&o) {
+            // The nesting boundary must be a literal `$` — a pool prefix
+            // followed by another char (`c$1` inside `c$1-IA`) is not an
+            // outer of this name.
+            if internal.len() > o.len() + 1
+                && internal.starts_with(&o)
+                && internal.as_bytes()[o.len()] == b'$'
+            {
                 let tail = &internal[o.len() + 1..];
                 if !tail.is_empty() && !tail.starts_with('$') && !tail.contains('/') {
                     // The tail may span several member levels
@@ -3282,6 +3288,15 @@ impl<'a> Printer<'a> {
             })
         };
         let simple_here = internal.rsplit('/').next().unwrap_or(internal).to_string();
+        // Hyphenated synthetic names (Kotlin's `-IA` internal-abstraction
+        // ctor markers: `org/a/c/c$1-IA`) are not source identifiers and
+        // can never be nested members or local classes — they emit as
+        // FLAT sanitized files (`c$1_IA.java`), so references must render
+        // the same flat sanitized full name. The local-class digit-strip
+        // path mangled them (`1-IA` → `-IA` → `_IA`, weibo ×157).
+        if simple_here.contains('-') {
+            return sanitize_source_name(&internal.replace('/', "."));
+        }
         let keep_dollar_pool = internal.contains('$')
             && self.ctx.has_class(internal)
             && self.ctx.find_outer(internal).is_none();
