@@ -1463,9 +1463,11 @@ impl<'a> Printer<'a> {
                         // frame subclass — weibo coroutine cluster ×1.3k).
                         // The downcast is what the bytecode's field
                         // resolution did; same honest cast as the Method
-                        // arm.
+                        // arm. Concrete name: a `$<digits>` declaring
+                        // class loses its pushed-down members under the
+                        // anon fallback.
                         out.push_str("((");
-                        out.push_str(&self.shorten(cls));
+                        out.push_str(&self.shorten_concrete(cls));
                         out.push_str(") ");
                         self.expr(o, 14, out);
                         out.push_str(").");
@@ -1818,7 +1820,7 @@ impl<'a> Printer<'a> {
                             // no bytecode trace when the receiver is
                             // already a subtype.
                             out.push_str("((");
-                            out.push_str(&self.shorten(cls));
+                            out.push_str(&self.shorten_concrete(cls));
                             out.push_str(") ");
                             self.expr(o, 14, out);
                             out.push_str(").");
@@ -2019,7 +2021,24 @@ impl<'a> Printer<'a> {
                     }
                 }
                 out.push('(');
-                out.push_str(&self.type_name(ty));
+                // A cast to a pool `$<digits>` class (desugared lambda /
+                // coroutine frame) must keep the CONCRETE name: the
+                // anon-fallback would print the SAM interface/super and
+                // drop exactly the members the cast exists to reach
+                // (weibo `(($reportWhenComplete$1) continuation).label`
+                // rendered `(ContinuationImpl) …` — label lives on the
+                // frame class only, R8 pushed it down; 找不到符号 ×420).
+                match ty {
+                    TypeRef::J(crate::types::JavaType::Object(n))
+                        if self.ctx.has_class(n)
+                            && n.rsplit('$')
+                                .next()
+                                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit())) =>
+                    {
+                        out.push_str(&self.shorten_concrete(n));
+                    }
+                    _ => out.push_str(&self.type_name(ty)),
+                }
                 out.push_str(") ");
                 // Inconvertible direct casts from mis-joined stack-merge
                 // vars (jdk26 AnnotationReader: `(SupertypeTarget)

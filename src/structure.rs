@@ -3121,7 +3121,7 @@ impl<'a> Structurer<'a> {
                         && universe.contains(&nb.id)
                         && !stop.contains(&nb.id)
                         && !claimed.contains(&nb.id)
-                        && !self.is_handler(nb.id)
+                        && (!self.is_handler(nb.id) || self.is_confluent_tail(gi, nb.id))
                         && !hf_next.contains(&nb.id)
                 });
                 match next {
@@ -7196,6 +7196,21 @@ impl<'a> Structurer<'a> {
         }
     }
 
+    /// True when block `b` is the CONFLUENT continuation of group `gi`:
+    /// the handler pc IS the span-end block and the try body falls
+    /// through to it on the normal path (d8 $SwitchMap clinits — the
+    /// NoSuchFieldError handler resumes at the body's own continuation,
+    /// no move-exception). Such a catch renders EMPTY and the block
+    /// belongs to the post-try walk.
+    fn is_confluent_tail(&self, gi: usize, b: usize) -> bool {
+        let g = &self.groups[gi];
+        self.cfg.block_at(g.end) == Some(b)
+            && self.cfg.blocks[b]
+                .pred
+                .iter()
+                .any(|p| self.body_group.get(p) == Some(&gi))
+    }
+
     pub(crate) fn structure_try(
         &mut self,
         gi: usize,
@@ -7416,6 +7431,18 @@ impl<'a> Structurer<'a> {
         }
         let mut catches = Vec::new();
         for (tys, _hpc, hb) in &merged_handlers {
+            // Confluent handler: exception flow resumes exactly where
+            // the body's normal fallthrough goes — an empty catch plus
+            // the shared tail emitted ONCE by the post-try walk (the
+            // caller relaxes its is_handler filter via
+            // is_confluent_tail). Walking the tail as the catch body
+            // pulled it off the normal path and bound the exception
+            // param into its first register read (`a =
+            // noSuchFieldError;` with `static int[] a`, weixin sp2/i2).
+            if self.is_confluent_tail(gi, *hb) {
+                catches.push((tys.clone(), *hb, Box::new(Region::Seq(Vec::new()))));
+                continue;
+            }
             let mut hstop: HashSet<usize> = HashSet::default();
             for b in universe.iter().copied() {
                 if self.body_group.get(&b) == Some(&gi) {
@@ -7741,7 +7768,9 @@ impl<'a> Structurer<'a> {
                         huniverse.retain(|b| !tail.contains(b) || private.contains(b));
                     }
                     // Multi-entry cont==hb: no strip (the f4472a5f shape —
-                    // the shared_merge machinery and outer walks handle it).
+                    // the shared_merge machinery and outer walks handle
+                    // it; the confluent fallthrough case short-circuits
+                    // to an empty catch before the universe is built).
                 } else if outer_cont_some
                     && !self.handler_group.contains_key(&cont)
                     && !hf.contains(&cont)
