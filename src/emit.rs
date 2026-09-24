@@ -3297,6 +3297,18 @@ impl<'a> Printer<'a> {
         if simple_here.contains('-') {
             return sanitize_source_name(&internal.replace('/', "."));
         }
+        // d8's synthetic outline/lambda/backport classes
+        // (`X$$ExternalSyntheticLambda0`, `…ApiModelOutline0`,
+        // `…BackportWithForwarding0`) are TOP-LEVEL synthetics emitted as
+        // flat files with their full `$` name. The local-class digit-strip
+        // path below mangles them to the bare innermost segment
+        // (`ExternalSyntheticBackportWithForwarding0`) when the outer chain
+        // has a digit segment (`PreviewView$1$$…`), which resolves to
+        // nothing cross-package ("找不到符号 变量 ExternalSynthetic…", weibo
+        // ×467). Render the full dotted name, like the hyphen case.
+        if simple_here.contains("$$ExternalSynthetic") {
+            return sanitize_source_name(&internal.replace('/', "."));
+        }
         let keep_dollar_pool = internal.contains('$')
             && self.ctx.has_class(internal)
             && self.ctx.find_outer(internal).is_none();
