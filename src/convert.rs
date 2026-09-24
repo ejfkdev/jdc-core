@@ -263,7 +263,9 @@ impl<'a> Converter<'a> {
     }
 
     pub fn convert(&mut self, r: Region) -> Stmt {
-        self.conv(r)
+        let mut st = self.conv(r);
+        prune_unused_labels(&mut st, &self.used_labels);
+        st
     }
 
     fn conv(&mut self, r: Region) -> Stmt {
@@ -421,12 +423,16 @@ impl<'a> Converter<'a> {
                     };
                     eprintln!("CLASSIFY-OUT header={} -> {}", header, kind);
                 }
-                if self.used_labels.contains(&label) {
-                    st = Stmt::Labeled {
-                        label,
-                        body: Box::new(st),
-                    };
-                }
+                // ALWAYS wrap; prune_unused_labels (post-convert) strips
+                // the wrapper when no break/continue ended up using it.
+                // Deciding at region-close missed breaks born in copied
+                // regions AFTER the loop popped (results[..].stmts
+                // clones / tail copies) — orphan `break L5` with no `L5:`
+                // (weixin 未定义的标签 ×687).
+                st = Stmt::Labeled {
+                    label,
+                    body: Box::new(st),
+                };
                 st
             }
             Region::Switch {
@@ -464,7 +470,7 @@ impl<'a> Converter<'a> {
                     default: default_stmt,
                     on_string: false,
                 };
-                if self.used_labels.contains(&sw_label) {
+                {
                     sw = Stmt::Labeled {
                         label: sw_label,
                         body: Box::new(sw),
@@ -1758,5 +1764,63 @@ fn stmt_to_vec(s: Stmt) -> Vec<Stmt> {
     match s {
         Stmt::Block(v) => v,
         other => vec![other],
+    }
+}
+
+/// Strip `Labeled` wrappers no Break/Continue ended up referencing.
+/// Wrappers are attached unconditionally during conv (a break born in a
+/// copied/follow region lands after its loop's region-close, so the
+/// at-close used_labels check orphaned it); after the full conversion
+/// used_labels is complete and the unused wrappers come off. An unused
+/// wrapper's body replaces it in-place (a Block body stays a nested
+/// block — downstream cleanup flattens).
+fn prune_unused_labels(st: &mut Stmt, used: &HashSet<String>) {
+    loop {
+        let take = matches!(st, Stmt::Labeled { label, .. } if !used.contains(label));
+        if !take {
+            break;
+        }
+        let inner = match std::mem::replace(st, Stmt::Block(Vec::new())) {
+            Stmt::Labeled { body, .. } => *body,
+            _ => unreachable!(),
+        };
+        *st = inner;
+    }
+    match st {
+        Stmt::Block(v) => v.iter_mut().for_each(|x| prune_unused_labels(x, used)),
+        Stmt::Labeled { body, .. } => prune_unused_labels(body, used),
+        Stmt::If { then_stmt, else_stmt, .. } => {
+            prune_unused_labels(then_stmt, used);
+            if let Some(e) = else_stmt {
+                prune_unused_labels(e, used);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::Synchronized { body, .. } => prune_unused_labels(body, used),
+        Stmt::For { init, body, .. } => {
+            init.iter_mut().for_each(|x| prune_unused_labels(x, used));
+            prune_unused_labels(body, used);
+        }
+        Stmt::Switch { cases, default, .. } => {
+            for c in cases.iter_mut() {
+                c.body.iter_mut().for_each(|x| prune_unused_labels(x, used));
+            }
+            if let Some(d) = default {
+                prune_unused_labels(d, used);
+            }
+        }
+        Stmt::Try { body, catches, finally }
+        | Stmt::TryWithResources { body, catches, finally, .. } => {
+            prune_unused_labels(body, used);
+            for c in catches.iter_mut() {
+                prune_unused_labels(&mut c.body, used);
+            }
+            if let Some(f) = finally {
+                prune_unused_labels(f, used);
+            }
+        }
+        _ => {}
     }
 }
