@@ -2060,7 +2060,18 @@ impl<'a> Printer<'a> {
                 self.lambda_sam_ret = None;
             }
             Expr::InstanceOf { e, ty } => {
-                self.expr(e, 10, out);
+                // `error2 instanceof CodecException` with error2: Error
+                // is "不兼容的类型" — instanceof demands castability
+                // exactly like a cast, so it takes the same Object
+                // relay (semantics unchanged: instanceof is a runtime
+                // type test).
+                if self.needs_object_relay(ty, e) {
+                    out.push_str("((Object) ");
+                    self.expr(e, 14, out);
+                    out.push(')');
+                } else {
+                    self.expr(e, 10, out);
+                }
                 out.push_str(" instanceof ");
                 out.push_str(&self.type_name(ty));
             }
@@ -3105,16 +3116,40 @@ impl<'a> Printer<'a> {
         if from == to || from.as_ref() == "java/lang/Object" || to.as_ref() == "java/lang/Object" {
             return false;
         }
-        if !self.ctx.has_class(&from) || !self.ctx.has_class(&to) {
+        // A KNOWN interface on either side keeps the direct form legal
+        // (casts/instanceof against an interface compile regardless of
+        // the operand's class).
+        let known_itf = |n: &str| self.ctx.has_class(n) && self.ctx.is_interface(n);
+        if known_itf(&from) || known_itf(&to) {
+            if self.ctx.has_class(&from) && self.ctx.has_class(&to) {
+                if self.ctx.is_subtype_of(&e.type_ref().erased(), &to)
+                    || self.ctx.is_subtype_of(&ty.erased(), &from)
+                {
+                    return false;
+                }
+                return self.ctx.is_sealed(&from) || self.ctx.is_sealed(&to);
+            }
             return false;
         }
-        if self.ctx.is_subtype_of(&e.type_ref().erased(), &to)
-            || self.ctx.is_subtype_of(&ty.erased(), &from)
-        {
-            return false;
+        if self.ctx.has_class(&from) && self.ctx.has_class(&to) {
+            if self.ctx.is_subtype_of(&e.type_ref().erased(), &to)
+                || self.ctx.is_subtype_of(&ty.erased(), &from)
+            {
+                return false;
+            }
+            let both_classes = !self.ctx.is_interface(&from) && !self.ctx.is_interface(&to);
+            return both_classes || self.ctx.is_sealed(&from) || self.ctx.is_sealed(&to);
         }
-        let both_classes = !self.ctx.is_interface(&from) && !self.ctx.is_interface(&to);
-        both_classes || self.ctx.is_sealed(&from) || self.ctx.is_sealed(&to)
+        // Off-pool (framework) side: the hierarchy is unknowable here.
+        // A direct cast fails exactly when both sides are classes and
+        // unrelated — treat unknowns as classes (java/lang/Throwable,
+        // Error, android.media.MediaCodec$CodecException all are) and
+        // relay through Object; the relay never changes cast semantics
+        // (`(T) e` vs `(T)(Object) e` — same runtime check), it only
+        // widens compile legality (weixin EncoderWriter
+        // `(CodecException) error2` with error2: Error, ry0/d4
+        // `(k) th3x` with th3x: Throwable — 不兼容的类型 ×250+).
+        true
     }
 
     pub fn shorten(&self, internal: &str) -> String {
