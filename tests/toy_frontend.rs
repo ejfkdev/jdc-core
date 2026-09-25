@@ -300,7 +300,7 @@ fn bind_catches(s: &mut Stmt, vt: &mut VarTable) {
                         let slot = vt.var(v).slot;
                         let name = format!("e{}", c.var_name.as_deref().unwrap_or(""));
                         let new_var =
-                            vt.add_catch_var(slot, name, TypeRef::J(JavaType::Object(exc.into())));
+                            vt.add_catch_var(slot, name, TypeRef::J(JavaType::Object(exc)));
                         if let Stmt::Block(vs) = c.body.as_mut() {
                             vs.remove(0);
                         }
@@ -626,7 +626,6 @@ fn register_machine_try_catch() {
     let mut body = structuralize(&cfg, &results);
     // Front-end step (see `bind_catches`): bind the catch parameter — the
     // converter leaves `Catch.var` unbound.
-    let mut vt = vt;
     bind_catches(&mut body, &mut vt);
     let text = print(&body, &vt);
     println!("--- scenario 3 ---\n{}", text);

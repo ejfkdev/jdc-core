@@ -102,6 +102,9 @@ fn has_break_exiting(s: &Stmt, lbl: Option<&str>, depth: usize) -> bool {
     }
 }
 
+/// The renamed `$assertionsDisabled` field (javac reserves the original name).
+pub const ASSERT_FIELD: &str = "$jcdcAssertionsDisabled";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +136,3 @@ mod tests {
         }));
     }
 }
-/// The renamed `$assertionsDisabled` field (javac reserves the original name).
-pub const ASSERT_FIELD: &str = "$jcdcAssertionsDisabled";

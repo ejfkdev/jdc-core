@@ -320,7 +320,7 @@ impl<'a> Printer<'a> {
                 format!("ignored{}", self.ignored_seq)
             };
             let clash = self.vt.vars.iter().any(|v| v.name == name)
-                || self.outer_names.iter().any(|n| *n == name);
+                || self.outer_names.contains(&name);
             if !clash {
                 return name;
             }
