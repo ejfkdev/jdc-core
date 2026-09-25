@@ -3522,7 +3522,11 @@ impl<'a> Printer<'a> {
         // every type position (signatures, casts, type refs).
         if let JavaType::Object(c) = t {
             if let Some(simple) = self.ctx.obscured_simple(c) {
-                return simple;
+                // The simple is a RAW `$`/path tail — digit-leading and
+                // other illegal source forms must pass the sanitizer
+                // like every other name path (WhatsApp `11o_2 v21;`
+                // local-decl types, 需要';' ×16,926).
+                return sanitize_source_name(&simple);
             }
         }
         match t {
