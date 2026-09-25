@@ -89,6 +89,14 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Install the map (call once, before worker threads spawn). Identity
 /// entries for unrenamed file-level classes are expected.
+/// Read-access to the installed class rename map (None before install).
+/// Lets the front-end derive per-package aggregates ONCE instead of
+/// probing apply_class_rename per candidate (an O(files × package)
+/// hot loop — WhatsApp package X has ~10k classes).
+pub fn with_renames<R>(f: impl FnOnce(&HashMap<String, String>) -> R) -> Option<R> {
+    RENAMES.get().map(f)
+}
+
 pub fn set_class_renames(map: HashMap<String, String>) {
     if !map.is_empty() {
         ACTIVE.store(true, Ordering::Relaxed);
