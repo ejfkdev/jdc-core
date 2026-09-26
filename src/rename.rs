@@ -143,6 +143,16 @@ pub fn apply_class_rename(internal: &str) -> Cow<'_, str> {
     }
     let mut s = internal;
     while let Some(i) = s.rfind('$') {
+        // A `$` followed by `/` is a PACKAGE-path dollar (desugar's
+        // `j$/util/...`), never a nesting boundary — matching the
+        // prefix as a class rewrote the whole desugar tree through a
+        // root-package class `j` once default-pkg relocation gave it a
+        // non-identity display (deepseek `ddcroot.j$.util` 程序包不存在
+        // ×8.6k).
+        if s.as_bytes().get(i + 1) == Some(&b'/') {
+            s = &s[..i];
+            continue;
+        }
         s = &s[..i];
         match map.get(s) {
             Some(d) if d != s => {
