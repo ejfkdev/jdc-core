@@ -3260,6 +3260,7 @@ impl<'a> Printer<'a> {
         if internal.is_empty() {
             return String::new();
         }
+
         // An import-resolved obscured reference renders its simple name
         // (the qualified form binds to an in-scope class — JLS 6.4.2).
         if let Some(simple) = self.ctx.obscured_simple(internal) {
@@ -3267,6 +3268,7 @@ impl<'a> Printer<'a> {
         }
         // Case-collision renames (`X/Cua` → `X/Cua_2`): the registry is
         // empty for ordinary corpora — one relaxed atomic load.
+        let orig_internal = internal;
         let cow = crate::rename::apply_class_rename(internal);
         let internal: &str = &cow;
         // Literal-$ top-level class (in pool, no InnerClasses nesting
@@ -3301,7 +3303,44 @@ impl<'a> Printer<'a> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '/')
         {
-            return sanitize_source_name(&internal.replace('/', "."));
+            let dotted = sanitize_source_name(&internal.replace('/', "."));
+            // NESTED member whose tail is structurally clean (starts an
+            // identifier) but carries unsafe characters (weibo's Kotlin
+            // `header/a$a-IA` → member `class a_u2dIA` INSIDE a.java):
+            // the reference must dot the `$` boundary like the decl side
+            // does — the flat `header.a$a_u2dIA` resolves to nothing
+            // (找不到符号 类 ×~500: b2/a$a_u2dIA/b$a_u2dIA families).
+            // Digit-start tails (`j$1-IA`) are flat emission-unit files
+            // KEEPING the `$`, and non-pool names (framework
+            // `Collection$-EL`) have no decl at all — both stay flat.
+            if !simple_here.contains("$$ExternalSynthetic") {
+                if let Some(i) = internal.rfind('$') {
+                    let tail = &internal[i + 1..];
+                    let outer = &internal[..i];
+                    let tail_clean = tail.chars().next().is_some_and(|c| {
+                        (c.is_ascii_alphabetic() || c == '_') && !c.is_ascii_digit()
+                    });
+                    let outer_safe = outer
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '/');
+                    // has_class on BOTH forms: when an outer rename rule
+                    // moved the family (obscuring a → a2), `internal` is
+                    // the DISPLAY chain and the pool key is the original
+                    // (weibo page/discover a$a-IA displayed under a2).
+                    if tail_clean
+                        && outer_safe
+                        && (self.ctx.has_class(internal)
+                            || self.ctx.has_class(orig_internal))
+                    {
+                        return format!(
+                            "{}.{}",
+                            sanitize_source_name(&outer.replace('/', ".")),
+                            sanitize_source_name(tail)
+                        );
+                    }
+                }
+            }
+            return dotted;
         }
         // d8's synthetic outline/lambda/backport classes
         // (`X$$ExternalSyntheticLambda0`, `…ApiModelOutline0`,
