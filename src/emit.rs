@@ -3172,6 +3172,17 @@ impl<'a> Printer<'a> {
     /// declaration and the constructor disagree in the correct direction:
     /// `Function0 v = new Outer$..$log$1(..)`.
     pub fn shorten_concrete(&self, internal: &str) -> String {
+        // Field-obscured package first segments (JLS 6.4.2): the
+        // qualified render is captured by the field, but the simple
+        // resolves through the file's import (JLS 7.5.1 legally
+        // shadows same-package siblings — the blocked set proved this
+        // file uses none of them). Static-member qualifiers printed
+        // qualified through the capture (lark pq/e: field `e2` ate
+        // `e2.c.b(..)` — "变量 c" ×47); digit-tail names never reach
+        // here (obscured_render_pub rejects un-importable simples).
+        if let Some(simple) = self.ctx.obscured_simple(internal) {
+            return sanitize_source_name(&simple);
+        }
         sanitize_source_name(&self.shorten_inner(internal, false))
     }
 
