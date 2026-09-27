@@ -1026,6 +1026,49 @@ impl<'a> Converter<'a> {
     /// Classify a loop region into while / do-while / infinite and assemble
     /// the final statement.
     fn classify_loop(&mut self, header: usize, body_stmt: Stmt, ctx: LoopCtx) -> Stmt {
+        let out = self.classify_loop_impl(header, body_stmt, ctx);
+        if crate::dbg_flag!("JCDC_DBG_LOOP") {
+            fn shape(s: &Stmt) -> String {
+                fn short(e: &Expr) -> String {
+                    format!("{:?}", e).chars().take(90).collect()
+                }
+                match s {
+                    Stmt::While { cond, body } => {
+                        format!("While({}) body={}", short(cond), shape(body))
+                    }
+                    Stmt::DoWhile { cond, .. } => format!("DoWhile({})", short(cond)),
+                    Stmt::For { cond, .. } => {
+                        format!("For({})", cond.as_ref().map(short).unwrap_or_default())
+                    }
+                    Stmt::Block(v) => format!(
+                        "Block[{}]",
+                        v.iter()
+                            .take(4)
+                            .map(|x| match x {
+                                Stmt::ExprStmt(_) => "expr".to_string(),
+                                Stmt::LocalDef { .. } => "def".to_string(),
+                                Stmt::If { cond, .. } => format!("if({})", short(cond)),
+                                Stmt::While { cond, .. } => format!("while({})", short(cond)),
+                                Stmt::DoWhile { .. } => "do".to_string(),
+                                Stmt::Break(_) => "break".to_string(),
+                                Stmt::Continue(l) => format!("cont{:?}", l),
+                                Stmt::Return(_) => "ret".to_string(),
+                                Stmt::Throw(_) => "throw".to_string(),
+                                Stmt::Try { .. } => "try".to_string(),
+                                _ => "…".to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    _ => "…".to_string(),
+                }
+            }
+            eprintln!("CLASSIFY-OUT header={} {}", header, shape(&out));
+        }
+        out
+    }
+
+    fn classify_loop_impl(&mut self, header: usize, body_stmt: Stmt, ctx: LoopCtx) -> Stmt {
         let term = self.results[header].term.clone();
         let succs = self.cfg.blocks[header].succ.clone();
 
@@ -1084,6 +1127,28 @@ impl<'a> Converter<'a> {
                     // Inverted self-loop: `while (!(c)) body` — the taken
                     // side exits, the fallthrough loops back.
                     let inner2 = strip_trailing_continue(body_stmt);
+                    // Stale-phi guard: the body's FIRST statement
+                    // recomputes the header's condition local (`X =
+                    // call(); if (X) {body}` — weixin DatabaseUtils'
+                    // allocRow cursor loop, hu4/k iterator). `while (X)`
+                    // would read X's PRE-loop value on the first test
+                    // (可能尚未初始化变量 / stale register), and a plain
+                    // do-while bottom test could read a register the
+                    // body interior reused. Inject the else-break and
+                    // rotate to do-while(true): the exit test then runs
+                    // exactly where the bytecode has it — after the
+                    // compute, before the body interior.
+                    if cond_var_reassigned_first(&inner2, &cond) {
+                        match try_protected_dowhile(inner2, &cond) {
+                            Ok(dw) => return dw,
+                            Err(inner) => {
+                                return Stmt::While {
+                                    cond: negate(cond.clone()),
+                                    body: Box::new(inner),
+                                };
+                            }
+                        }
+                    }
                     return Stmt::While {
                         cond: negate(cond.clone()),
                         body: Box::new(inner2),
@@ -1166,8 +1231,11 @@ impl<'a> Converter<'a> {
                     };
                 }
                 // The body walk re-emitted the header's own If region; unwrap
-                // it so the loop reads `while (C) { else-part }`.
-                let (inner, exit_stmts) = split_leading_if(&body_stmt, &cond);
+                // it so the loop reads `while (C) { else-part }`. `stripped`
+                // is false when the test was NOT the body's first statement
+                // (the header COMPUTES its condition: `v = it.hasNext();
+                // if-eqz v`) — the re-emission then stays in the body.
+                let (inner, exit_stmts, stripped) = split_leading_if(&body_stmt, &cond);
                 // A top test the structurer wrapped in a TRY (the header
                 // block sits inside its handler's protected range — jdk26
                 // Bits.reserveMemory's backoff retry loop tests
@@ -1202,10 +1270,37 @@ impl<'a> Converter<'a> {
                 if taken_is_exit && plain_exit {
                     match try_protected_dowhile(inner, &cond) {
                         Ok(dw) => dw,
-                        Err(inner) => Stmt::While {
-                            cond: while_cond,
-                            body: Box::new(inner),
-                        },
+                        Err(inner) => {
+                            if crate::dbg_flag!("JCDC_DBG_LOOP") {
+                                eprintln!(
+                                    "STALEDBG arm=taken_plain header={} stripped={} leading={} cond={:?}",
+                                    header,
+                                    stripped,
+                                    leading_test_present(&inner, &cond, true),
+                                    cond
+                                );
+                            }
+                            // Strip failed and the header's own test-and-
+                            // break is still inside the body: the rotated
+                            // cond would re-read the condition local's
+                            // STALE pre-loop value — `while (v) {
+                            // v = it.hasNext(); ... }` is a definite-
+                            // assignment error (可能尚未初始化变量, weixin
+                            // ×14k files), and even a pre-initialized v
+                            // tests the stale register on entry. The
+                            // in-body break is the real exit; while(true)
+                            // is the faithful header (same intent as the
+                            // TRY-wrapped guard above).
+                            let hc = if !stripped && leading_test_present(&inner, &cond, true) {
+                                Expr::Const(ConstVal::Int(1))
+                            } else {
+                                while_cond
+                            };
+                            Stmt::While {
+                                cond: hc,
+                                body: Box::new(inner),
+                            }
+                        }
                     }
                 } else if taken_is_exit {
                     // Exit branch runs statements before leaving:
@@ -1244,10 +1339,20 @@ impl<'a> Converter<'a> {
                         // then-side was the exit scaffolding; body is `inner`
                         match try_protected_dowhile(inner, &cond) {
                             Ok(dw) => dw,
-                            Err(inner) => Stmt::While {
-                                cond: while_cond,
-                                body: Box::new(inner),
-                            },
+                            Err(inner) => {
+                                // Same stale-phi guard as the taken_is_exit
+                                // arm above (this orientation keeps `cond`
+                                // un-negated).
+                                let hc = if !stripped && leading_test_present(&inner, &cond, false) {
+                                    Expr::Const(ConstVal::Int(1))
+                                } else {
+                                    while_cond
+                                };
+                                Stmt::While {
+                                    cond: hc,
+                                    body: Box::new(inner),
+                                }
+                            }
                         }
                     } else {
                         // then-side carries the body ending with the back
@@ -1405,13 +1510,13 @@ fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
             _ => false,
         }
     }
-    fn inject(s: &mut Stmt, cond: &Expr) -> bool {
+    fn inject(s: &mut Stmt, cond: &Expr, ncond: &Expr) -> bool {
         match s {
             Stmt::If {
                 cond: c,
                 then_stmt,
                 else_stmt,
-            } if c == cond => {
+            } if same_test(c, cond) => {
                 let then_empty = is_empty(then_stmt);
                 let else_empty = else_stmt.as_ref().map(|e| is_empty(e)).unwrap_or(true);
                 if then_empty && !else_empty {
@@ -1424,14 +1529,83 @@ fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
                     false
                 }
             }
-            Stmt::Try { body, .. } | Stmt::TryWithResources { body, .. } => inject(body, cond),
-            Stmt::Block(v) => v.first_mut().map(|f| inject(f, cond)).unwrap_or(false),
-            Stmt::Labeled { body, .. } | Stmt::Synchronized { body, .. } => inject(body, cond),
+            // Flipped polarity: the emission normalizer dropped an EMPTY
+            // exit arm and re-oriented the test (`if (X) {body}` where
+            // X = ¬cond — weixin hu4/k `while (hasNext) { hasNext =
+            // it.hasNext(); if (hasNext) {…} }`). THEN is the interior
+            // and ELSE the exit side; only the missing/empty-else shape
+            // is safely fillable (`if (X) {body} else break;`). An empty
+            // THEN with a materialized ELSE would need the break AFTER
+            // the else statements — this filler cannot express that, so
+            // refuse rather than skip the exit path.
+            Stmt::If {
+                cond: c,
+                then_stmt,
+                else_stmt,
+            } if same_test(c, ncond) => {
+                let else_empty = else_stmt.as_ref().map(|e| is_empty(e)).unwrap_or(true);
+                if else_empty && !is_empty(then_stmt) {
+                    *else_stmt = Some(Box::new(Stmt::Break(None)));
+                    true
+                } else {
+                    false
+                }
+            }
+            Stmt::Try { body, .. } | Stmt::TryWithResources { body, .. } => {
+                inject(body, cond, ncond)
+            }
+            Stmt::Block(v) => {
+                for st in v.iter_mut() {
+                    match st {
+                        // The header's condition computation precedes the
+                        // re-emitted test — scan on.
+                        Stmt::ExprStmt(_)
+                        | Stmt::LocalDef { .. }
+                        | Stmt::Comment(_)
+                        | Stmt::MonitorEnter(_)
+                        | Stmt::MonitorExit(_) => continue,
+                        other => return inject(other, cond, ncond),
+                    }
+                }
+                false
+            }
+            Stmt::Labeled { body, .. } | Stmt::Synchronized { body, .. } => {
+                inject(body, cond, ncond)
+            }
             _ => false,
         }
     }
     let mut b = inner;
-    if inject(&mut b, cond) {
+    let ncond = negate(cond.clone());
+    let r = inject(&mut b, cond, &ncond);
+    if crate::dbg_flag!("JCDC_DBG_LOOP") {
+        eprintln!(
+            "TPD inject={} cond={} body0={}",
+            r,
+            format!("{:?}", cond).chars().take(70).collect::<String>(),
+            match &b {
+                Stmt::Block(v) => v
+                    .iter()
+                    .take(3)
+                    .map(|x| match x {
+                        Stmt::If { cond: c, then_stmt, else_stmt } => format!(
+                            "if({} )then_empty={} else={}",
+                            format!("{:?}", c).chars().take(50).collect::<String>(),
+                            matches!(&**then_stmt, Stmt::Block(bb) if bb.is_empty()),
+                            else_stmt.is_some()
+                        ),
+                        Stmt::LocalDef { .. } => "def".to_string(),
+                        Stmt::ExprStmt(_) => "expr".to_string(),
+                        _ => "other".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|"),
+                Stmt::If { cond: c, .. } => format!("topif({:?})", c).chars().take(60).collect(),
+                _ => "nonblock".to_string(),
+            }
+        );
+    }
+    if r {
         Ok(Stmt::DoWhile {
             body: Box::new(b),
             cond: Expr::Const(ConstVal::Int(1)),
@@ -1441,7 +1615,11 @@ fn try_protected_dowhile(inner: Stmt, cond: &Expr) -> Result<Stmt, Stmt> {
     }
 }
 
-fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>) {
+/// Unwrap the header's re-emitted `if (cond) {exit} else {body}` from the
+/// top of a loop body. The bool reports whether the strip happened: false
+/// means the test was NOT the body's first statement (a condition-computing
+/// header leads with its Assign) and the re-emission is still inside.
+fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>, bool) {
     let items = match body {
         Stmt::Block(v) => v,
         other => {
@@ -1456,8 +1634,9 @@ fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>) {
                         .map(|e| (**e).clone())
                         .unwrap_or(Stmt::Block(vec![])),
                     stmt_to_vec((**then_stmt).clone()),
+                    true,
                 ),
-                _ => (other.clone(), vec![]),
+                _ => (other.clone(), vec![], false),
             };
         }
     };
@@ -1482,11 +1661,226 @@ fn split_leading_if(body: &Stmt, cond: &Expr) -> (Stmt, Vec<Stmt>) {
                     rest.extend(items[1..].iter().cloned());
                     Stmt::Block(rest)
                 };
-                return (inner, stmt_to_vec((**then_stmt).clone()));
+                return (inner, stmt_to_vec((**then_stmt).clone()), true);
             }
         }
     }
-    (body.clone(), vec![])
+    (body.clone(), vec![], false)
+}
+
+/// Canonical form of a boolean test for STRUCTURAL comparison. The header
+/// Term keeps the raw dex idiom (`X == 0` for if-eqz on a boolean
+/// register) while the re-emitted in-body If often carries the simplified
+/// `X` / `!X` — raw `==` misses the pair (weixin allocRow cursor-loop
+/// family stayed stale-rotated without this). Folds `X == 0` → `!X`,
+/// `X != 0` → `X`, and double negations.
+fn canon_test(e: &Expr) -> Expr {
+    fn is_zero(c: &Expr) -> bool {
+        matches!(c, Expr::Const(ConstVal::Int(0)))
+    }
+    match e {
+        Expr::Bin {
+            op: BinOp::Eq,
+            l,
+            r,
+            ..
+        } => {
+            if is_zero(r) {
+                Expr::Un {
+                    op: UnOp::Not,
+                    e: Box::new(canon_test(l)),
+                }
+            } else if is_zero(l) {
+                Expr::Un {
+                    op: UnOp::Not,
+                    e: Box::new(canon_test(r)),
+                }
+            } else {
+                e.clone()
+            }
+        }
+        Expr::Bin {
+            op: BinOp::Ne,
+            l,
+            r,
+            ..
+        } => {
+            if is_zero(r) {
+                canon_test(l)
+            } else if is_zero(l) {
+                canon_test(r)
+            } else {
+                e.clone()
+            }
+        }
+        Expr::Un {
+            op: UnOp::Not,
+            e: inner,
+        } => match canon_test(inner) {
+            Expr::Un {
+                op: UnOp::Not,
+                e: x,
+            } => *x,
+            other => Expr::Un {
+                op: UnOp::Not,
+                e: Box::new(other),
+            },
+        },
+        _ => e.clone(),
+    }
+}
+
+/// Structural equality of two boolean tests modulo the zero-comparison
+/// idiom (`X == 0` ≡ `!X`).
+fn same_test(a: &Expr, b: &Expr) -> bool {
+    if a == b {
+        return true;
+    }
+    canon_test(a) == canon_test(b)
+}
+
+/// True when the loop body still carries the header block's re-emitted exit
+/// test at its leading position: zero or more condition-computing simple
+/// statements followed by `if (cond) …` (possibly under region wrappers).
+/// The first If/control statement encountered is decisive — a later
+/// same-condition diamond deeper in the body does not count.
+///
+/// `exit_on_taken` orients the test: the taken_is_exit arm of classify_loop
+/// has the EXIT on the term's taken side (`if (c) {exit}`), the fall-exit
+/// arm has it on the else (`if (c) {interior} else {exit}`). The exit side
+/// must TERMINATE (break/return/throw/labeled-continue — recursively
+/// through blocks and both-arm-terminating ifs); the interior side may end
+/// anywhere (falling to the loop bottom IS the back edge). Without a
+/// terminating exit side, `while (true)` would spin forever — the
+/// empty-exit-arm shapes belong to try_protected_dowhile's break
+/// injection, which runs first.
+fn leading_test_present(s: &Stmt, cond: &Expr, exit_on_taken: bool) -> bool {
+    fn terminates(t: &Stmt) -> bool {
+        match t {
+            Stmt::Break(_) | Stmt::Return(_) | Stmt::Throw(_) => true,
+            // A LABELED continue targets an enclosing loop — it leaves
+            // this one, so the in-body exit is real (weixin aa2/b:
+            // `if (!hasNext) continue L1;`). A BARE continue is this
+            // loop's own back edge — NOT an exit (while(true) would
+            // re-spin the test forever); it must stay on the old path.
+            Stmt::Continue(Some(_)) => true,
+            Stmt::Block(v) => v.last().map(terminates).unwrap_or(false),
+            // An if whose BOTH arms leave the loop terminates too.
+            Stmt::If {
+                then_stmt,
+                else_stmt,
+                ..
+            } => {
+                terminates(then_stmt)
+                    && else_stmt
+                        .as_ref()
+                        .map(|e| terminates(e))
+                        .unwrap_or(false)
+            }
+            Stmt::Labeled { body, .. } => terminates(body),
+            _ => false,
+        }
+    }
+    fn term_opt(o: &Option<Box<Stmt>>) -> bool {
+        o.as_ref().map(|e| terminates(e)).unwrap_or(false)
+    }
+    fn go(s: &Stmt, cond: &Expr, ncond: &Expr, exit_on_taken: bool) -> bool {
+        match s {
+            Stmt::If {
+                cond: c,
+                then_stmt,
+                else_stmt,
+            } => {
+                let direct = same_test(c, cond);
+                let flipped = !direct && same_test(c, ncond);
+                if !direct && !flipped {
+                    return false;
+                }
+                // Exit side: a direct-oriented test carries the term's
+                // taken side in THEN; a flipped test swaps the arms.
+                // `exit_on_taken` says which term side exits in the
+                // calling classify arm.
+                let exit_is_then = direct == exit_on_taken;
+                if exit_is_then {
+                    terminates(then_stmt)
+                } else {
+                    term_opt(else_stmt)
+                }
+            }
+            Stmt::Try { body, .. }
+            | Stmt::TryWithResources { body, .. }
+            | Stmt::Labeled { body, .. }
+            | Stmt::Synchronized { body, .. } => go(body, cond, ncond, exit_on_taken),
+            Stmt::Block(v) => {
+                for st in v {
+                    match st {
+                        Stmt::ExprStmt(_)
+                        | Stmt::LocalDef { .. }
+                        | Stmt::Comment(_)
+                        | Stmt::MonitorEnter(_)
+                        | Stmt::MonitorExit(_) => continue,
+                        other => return go(other, cond, ncond, exit_on_taken),
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+    go(s, cond, &negate(cond.clone()), exit_on_taken)
+}
+
+/// True when the body's first meaningful statement assigns the SAME local
+/// the header condition tests (`X = call(); …` where cond = ±X) — the
+/// compute-then-test shape whose rotated `while (X)` header would read X's
+/// stale pre-loop value.
+fn cond_var_reassigned_first(s: &Stmt, cond: &Expr) -> bool {
+    fn cond_local(c: &Expr) -> Option<u32> {
+        match c {
+            Expr::Local { var, .. } => Some(*var),
+            Expr::Un {
+                op: UnOp::Not,
+                e,
+            } => cond_local(e),
+            // boolean-zero idiom: `X == 0` / `0 != X` (dex if-eqz on a
+            // boolean register keeps this raw form in the Term).
+            Expr::Bin {
+                op: BinOp::Eq | BinOp::Ne,
+                l,
+                r,
+                ..
+            } => {
+                if matches!(&**r, Expr::Const(ConstVal::Int(0))) {
+                    cond_local(l)
+                } else if matches!(&**l, Expr::Const(ConstVal::Int(0))) {
+                    cond_local(r)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+    let Some(v) = cond_local(cond) else {
+        return false;
+    };
+    fn go(s: &Stmt, v: u32) -> bool {
+        match s {
+            Stmt::ExprStmt(Expr::Assign { target, .. }) => {
+                matches!(&**target, Expr::Local { var, .. } if *var == v)
+            }
+            Stmt::LocalDef {
+                var, init: Some(_), ..
+            } => *var == v,
+            Stmt::Block(b) => b.first().map(|f| go(f, v)).unwrap_or(false),
+            Stmt::Try { body, .. }
+            | Stmt::TryWithResources { body, .. }
+            | Stmt::Labeled { body, .. }
+            | Stmt::Synchronized { body, .. } => go(body, v),
+            _ => false,
+        }
+    }
+    go(s, v)
 }
 
 /// Remove a trailing `continue;` (loop back-edge) from a statement list.
