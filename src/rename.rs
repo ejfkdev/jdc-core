@@ -122,6 +122,39 @@ pub fn is_renamed_display(internal: &str) -> bool {
     REVERSE.get().is_some_and(|m| m.contains_key(internal))
 }
 
+/// The POOL-side (pre-rename) internal of a DISPLAY name — the mirror
+/// of `apply_class_rename` over the REVERSE index. Pool lookups fed
+/// with display names (the ddcroot root-package migration renames
+/// `Foo$Bar` to `ddcroot/Foo$Bar`) miss without this: jdc-core's
+/// nested_display then read the class as off-pool and dotted its `$`
+/// against a flat declaration (lark's R8-outer-deleted
+/// UserCustomStatusExtraParams$* enum family, "不可见" ×138).
+#[inline]
+pub fn unrename_class(internal: &str) -> Cow<'_, str> {
+    if !ACTIVE.load(Ordering::Relaxed) {
+        return Cow::Borrowed(internal);
+    }
+    let Some(map) = REVERSE.get() else {
+        return Cow::Borrowed(internal);
+    };
+    if let Some(o) = map.get(internal) {
+        return Cow::Owned(o.clone());
+    }
+    let mut s = internal;
+    while let Some(i) = s.rfind('$') {
+        if s.as_bytes().get(i + 1) == Some(&b'/') {
+            s = &s[..i];
+            continue;
+        }
+        s = &s[..i];
+        if let Some(o) = map.get(s) {
+            let suffix = &internal[s.len()..];
+            return Cow::Owned(format!("{o}{suffix}"));
+        }
+    }
+    Cow::Borrowed(internal)
+}
+
 /// The display form of an internal class name. Exact file-level match
 /// first; otherwise walk `$` boundaries from the right — a nested
 /// reference (`X/Cua$Inner`) follows its renamed file-level owner, and
