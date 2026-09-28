@@ -1069,7 +1069,27 @@ impl<'a> Printer<'a> {
                 }
             }
             Expr::This => out.push_str("this"),
-            Expr::New { cls, args, ty, .. } => {
+            Expr::New {
+                cls,
+                args,
+                ty,
+                arg_tys,
+                ..
+            } => {
+                // The dex invoke-direct descriptor's formals, when the
+                // node carries them at full arity: GROUND TRUTH for the
+                // typed-arg rendering. The arity-based ctx lookup picks
+                // `ctors_by_arity(..).first()` — a class with two
+                // same-arity ctors (netease EnterLive: `(long,boolean)`
+                // beside `(List,int)`) got the WRONG overload's formals
+                // and the boolean formal rendered the int const arg as
+                // `false` ("找不到合适的构造器" ×1,053-family).
+                let pinned: Option<&[crate::types::JavaType]> =
+                    if !arg_tys.is_empty() && arg_tys.len() == args.len() {
+                        Some(arg_tys.as_slice())
+                    } else {
+                        None
+                    };
                 let no_diamond = self.suppress_diamond;
                 self.suppress_diamond = false;
                 // Explicit type arguments pinned by the AST passes
@@ -1202,9 +1222,13 @@ impl<'a> Printer<'a> {
                     out.push_str(&inner_simple(cls));
                     out.push_str(diamond);
                     out.push('(');
-                    match self.ctor_param_types(cls, 1, args.len() - 1, &args[1..]) {
-                        Some(pt) => self.args_typed(&args[1..], &pt, out),
-                        None => self.args(&args[1..], out),
+                    if let Some(pt) = pinned {
+                        self.args_typed(&args[1..], &pt[1..], out);
+                    } else {
+                        match self.ctor_param_types(cls, 1, args.len() - 1, &args[1..]) {
+                            Some(pt) => self.args_typed(&args[1..], &pt, out),
+                            None => self.args(&args[1..], out),
+                        }
                     }
                     out.push(')');
                 } else {
@@ -1252,9 +1276,13 @@ impl<'a> Printer<'a> {
                     out.push_str(diamond);
                     out.push('(');
                     if member_this {
-                        match self.ctor_param_types(cls, 1, args.len() - 1, &args[1..]) {
-                            Some(pt) => self.args_typed(&args[1..], &pt, out),
-                            None => self.args(&args[1..], out),
+                        if let Some(pt) = pinned {
+                            self.args_typed(&args[1..], &pt[1..], out);
+                        } else {
+                            match self.ctor_param_types(cls, 1, args.len() - 1, &args[1..]) {
+                                Some(pt) => self.args_typed(&args[1..], &pt, out),
+                                None => self.args(&args[1..], out),
+                            }
                         }
                     } else {
                         // Pinned generic instantiation: prime lambda args
@@ -1295,9 +1323,13 @@ impl<'a> Printer<'a> {
                             }
                             _ => Vec::new(),
                         };
-                        match self.ctor_param_types(cls, 0, args.len(), args) {
-                            Some(pt) => self.args_typed_sam(args, &pt, &sam_rets, out),
-                            None => self.args(args, out),
+                        if let Some(pt) = pinned {
+                            self.args_typed_sam(args, pt, &sam_rets, out);
+                        } else {
+                            match self.ctor_param_types(cls, 0, args.len(), args) {
+                                Some(pt) => self.args_typed_sam(args, &pt, &sam_rets, out),
+                                None => self.args(args, out),
+                            }
                         }
                     }
                     out.push(')');
