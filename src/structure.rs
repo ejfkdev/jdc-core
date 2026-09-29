@@ -5366,8 +5366,23 @@ impl<'a> Structurer<'a> {
     /// from the render entirely, 缺少返回语句).
     fn expand_orphan_group_tails(&self, out: &mut HashSet<usize>, from: usize) {
         let structuring = self.structuring_groups.borrow().clone();
+        // Group-presence sets over `out`, refreshed as adoptions grow it.
+        // The per-node rescans below used to walk ALL of out × groups (and
+        // all of blocks) — O(G·|out|·nodes) per call; once the
+        // handler-parse fix surfaced the real group count, that alone
+        // burned ~5× wall on weibo's synchronized monsters.
+        let mut present_body: crate::fx::FxHashSet<usize> = crate::fx::FxHashSet::default();
+        let mut present_handler: crate::fx::FxHashSet<usize> = crate::fx::FxHashSet::default();
+        for &x in out.iter() {
+            if let Some(&gi) = self.body_group.get(&x) {
+                present_body.insert(gi);
+            }
+            if let Some(&gi) = self.handler_group.get(&x) {
+                present_handler.insert(gi);
+            }
+        }
         let mut frontier: Vec<usize> = vec![from];
-        let mut seen: HashSet<usize> = HashSet::default();
+        let mut seen: crate::fx::FxHashSet<usize> = crate::fx::FxHashSet::default();
         let mut guard = 0;
         while let Some(b) = frontier.pop() {
             guard += 1;
@@ -5402,9 +5417,10 @@ impl<'a> Structurer<'a> {
                 // their tail will never be emitted elsewhere.
                 let start_held = self
                     .cfg
-                    .blocks
-                    .iter()
-                    .any(|nb| nb.start == og.start && out.contains(&nb.id));
+                    .block_at(og.start)
+                    .is_some_and(|bid| {
+                        self.cfg.blocks[bid].start == og.start && out.contains(&bid)
+                    });
                 if structuring.contains(&ogi) || start_held {
                     continue;
                 }
@@ -5413,32 +5429,27 @@ impl<'a> Structurer<'a> {
                 // the owner walk handles it (ZipFile.getComment's
                 // enclosing-group tail; Module.loadModuleInfoClass's
                 // post-try cont) — never an orphan.
-                let inside_active = out.iter().any(|&x| {
-                    self.body_group.get(&x) == Some(&ogi)
-                        || self.handler_group.get(&x) == Some(&ogi)
-                });
-                if inside_active {
+                if present_body.contains(&ogi) || present_handler.contains(&ogi) {
                     continue;
                 }
-                if self.groups.iter().enumerate().any(|(gi, g)| {
-                    out.iter().any(|&x| self.body_group.get(&x) == Some(&gi))
-                        && g.start <= og.start
-                        && g.end >= og.end
-                }) {
+                let spanned = present_body.iter().any(|&gi| {
+                    let g = &self.groups[gi];
+                    g.start <= og.start && g.end >= og.end
+                });
+                if spanned {
                     continue;
                 }
                 // Adopt the full span + handler heads (structure_try
                 // rebuilds handlers itself) + the group's own tail
                 // closure beyond the span end.
-                let mut adopt: Vec<usize> = self
+                let lo = self
                     .cfg
                     .blocks
+                    .partition_point(|nb| nb.start < og.start);
+                let mut adopt: Vec<usize> = self.cfg.blocks[lo..]
                     .iter()
-                    .filter(|nb| {
-                        nb.ins_len != 0
-                            && nb.start >= og.start
-                            && nb.end <= og.end.max(og.start + 1)
-                    })
+                    .take_while(|nb| nb.end <= og.end.max(og.start + 1))
+                    .filter(|nb| nb.ins_len != 0)
                     .map(|nb| nb.id)
                     .collect();
                 for (&hb, &hg) in self.handler_group.iter() {
@@ -5464,8 +5475,15 @@ impl<'a> Structurer<'a> {
                     x = self.cfg.blocks[nxt].start;
                 }
                 for id in adopt {
-                    out.insert(id);
-                    frontier.push(id);
+                    if out.insert(id) {
+                        if let Some(&gi) = self.body_group.get(&id) {
+                            present_body.insert(gi);
+                        }
+                        if let Some(&gi) = self.handler_group.get(&id) {
+                            present_handler.insert(gi);
+                        }
+                        frontier.push(id);
+                    }
                 }
             }
         }
@@ -7411,6 +7429,16 @@ impl<'a> Structurer<'a> {
 
         // Merge multi-catch: consecutive handlers with the same handler block
         // become one catch with multiple types.
+        if crate::dbg_flag!("JCDC_DBG_CATCH") {
+            eprintln!(
+                "[grp] gi={} span=({},{}) handlers={:?} exc_ranges={:?}",
+                gi,
+                g.start,
+                g.end,
+                g.handlers,
+                self.cfg.exc_ranges.iter().map(|r| (r.start, r.end, r.handler)).collect::<Vec<_>>()
+            );
+        }
         let mut merged_handlers: Vec<(Vec<std::sync::Arc<str>>, u32, usize)> = Vec::new(); // types, hpc, hb
         for (hpc, ty) in &g.handlers {
             let Some(hb) = self.cfg.block_at(*hpc) else {
@@ -7445,7 +7473,7 @@ impl<'a> Structurer<'a> {
             }
             let mut hstop: HashSet<usize> = HashSet::default();
             for b in universe.iter().copied() {
-                if self.body_group.get(&b) == Some(&gi) {
+                if self.body_group.get(&b) == Some(&gi) && b != *hb {
                     hstop.insert(b);
                 }
             }
@@ -7480,11 +7508,19 @@ impl<'a> Structurer<'a> {
             // belong to an enclosing group's span while being part of this
             // handler's flow (nested try-with-resources).
             huniverse.retain(|b| {
-                let body_before_end = self
-                    .body_group
-                    .get(b)
-                    .map(|_ogi| self.cfg.blocks[*b].start < g.end)
-                    .unwrap_or(false);
+                // The handler head rides inside the group span when d8's
+                // self-protection range over the handler's own monitorexit
+                // merged into this group — it must stay (it IS the walk
+                // start; excluding it emptied the universe and the walk
+                // never reached the rethrow tail, swallowing the
+                // exception: reqable s2/w.a `catch (Throwable) {
+                // monitorexit }` with the bytecode's throw gone).
+                let body_before_end = *b != *hb
+                    && self
+                        .body_group
+                        .get(b)
+                        .map(|_ogi| self.cfg.blocks[*b].start < g.end)
+                        .unwrap_or(false);
                 !body_before_end && (!self.handler_group.contains_key(b) || *b == *hb)
             });
             // Also exclude the post-try continuation flow: blocks reachable

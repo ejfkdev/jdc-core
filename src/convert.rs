@@ -100,6 +100,14 @@ pub struct Converter<'a> {
 }
 
 /// Remove a trailing `Goto` whose target is the natural continuation.
+fn stmt_has_throw(s: &Stmt) -> bool {
+    match s {
+        Stmt::Throw(_) => true,
+        Stmt::Block(v) => v.iter().any(stmt_has_throw),
+        _ => false,
+    }
+}
+
 fn strip_trailing_goto(s: &mut Stmt, follow: Option<usize>) {
     let Some(f) = follow else { return };
     let items = match s {
@@ -496,7 +504,21 @@ impl<'a> Converter<'a> {
                 strip_trailing_goto(&mut body_stmt, try_follow);
                 let mut catch_stmts = Vec::new();
                 for (tys, _hblock, r) in catches {
+                    if crate::dbg_flag!("JCDC_DBG_CATCH") {
+                        let succs = &self.cfg.blocks[_hblock].succ;
+                        let succ_terms: Vec<_> = succs
+                            .iter()
+                            .map(|&s| (s, self.results[s].term.clone()))
+                            .collect();
+                        eprintln!(
+                            "[catch] gi={} hb={} term={:?} succ={:?} tys={:?} region={:#?}",
+                            group_idx, _hblock, self.results[_hblock].term, succ_terms, tys, r
+                        );
+                    }
                     let mut s = self.conv(*r);
+                    if crate::dbg_flag!("JCDC_DBG_CATCH") {
+                        eprintln!("[catch] conv'd has_throw={}", stmt_has_throw(&s));
+                    }
                     strip_trailing_goto(&mut s, try_follow);
                     catch_stmts.push(Catch {
                         exc: tys,

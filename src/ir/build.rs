@@ -76,10 +76,15 @@ pub fn has_side_effects(e: &Expr) -> bool {
         | Expr::Lambda(_)
         | Expr::AnonNew { .. } => true,
         Expr::Assign { .. } | Expr::PreIncDec { .. } | Expr::PostIncDec { .. } => true,
-        Expr::Field { owner, .. } => {
-            // getfield can NPE / trigger clinit; keep to be safe unless owner is this
-            owner.is_some()
-        }
+        Expr::Field { owner, .. } => match owner.as_deref() {
+            // `this.f` in both spellings (implicit-this and the receiver
+            // register var 0, the ddc lifter's ABI slot) cannot NPE — the
+            // read is semantically dead in a discarded-value context.
+            None => false,
+            Some(Expr::This) => false,
+            Some(Expr::Local { var: 0, .. }) => false,
+            Some(_) => true,
+        },
         Expr::ArrayIndex { .. } => true,
         Expr::Un { e, .. } | Expr::Cast { e, .. } | Expr::InstanceOf { e, .. } => {
             has_side_effects(e)
