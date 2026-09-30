@@ -2486,7 +2486,12 @@ impl<'a> Structurer<'a> {
         // Blocks inside a try group whose start is in the universe are kept
         // even if their predecessors are outside: their flow is carved out
         // by the Try region and continues at the group's end.
-        let mut eff = universe.clone();
+        // Zero-clone form: the old code cloned the whole universe TWICE
+        // (`eff` then `seed`) per call — this runs per arm walk and the
+        // clones dominated structurer CPU on the large corpora. Membership
+        // at the retain is `universe ∪ {from} ∪ expansions`, with only the
+        // (small) group-span EXPANSIONS materialized.
+        let mut eff: HashSet<usize> = HashSet::default();
         // The walk root itself seeds the group expansion even when it lies
         // OUTSIDE the passed universe: a protected branch target from a
         // smaller group's body walk (jdk11 SocketChannelImpl.finishConnect's
@@ -2500,9 +2505,7 @@ impl<'a> Structurer<'a> {
         // catch(IOException) try body unable to throw (不能抛出异常错误) and
         // the blocking/connected locals dangling. The holds_start guard
         // still blocks mid-group roots from ballooning (getInputStream0).
-        eff.insert(from);
-        let seed = eff.clone();
-        for &b in &seed {
+        for b in universe.iter().copied().chain(std::iter::once(from)) {
             if let Some(&gi) = self.body_group.get(&b) {
                 let g = &self.groups[gi];
                 // Expand to the full span ONLY when the scope holds the
@@ -2513,22 +2516,42 @@ impl<'a> Structurer<'a> {
                 // entire method body into the catch with the handler's
                 // (nested-less) group visibility, emitting the reflection
                 // try's call bare (未报告的异常错误NoSuchFieldException).
-                let holds_start = self
+                // Exact mirror of the old `any(|nb| nb.start == g.start
+                // && seed.contains(&nb.id))` via the pc-sorted index
+                // (starts are unique — the first block at/after g.start
+                // is the only candidate); block_at would answer for the
+                // CONTAINING block, which diverges when a range starts
+                // mid-block.
+                let hs_idx = self
                     .cfg
                     .blocks
-                    .iter()
-                    .any(|nb| nb.start == g.start && seed.contains(&nb.id));
+                    .partition_point(|nb| nb.start < g.start);
+                let holds_start = self.cfg.blocks.get(hs_idx).is_some_and(|nb| {
+                    nb.start == g.start && (universe.contains(&nb.id) || nb.id == from)
+                });
                 if !holds_start {
                     continue;
                 }
-                for nb in &self.cfg.blocks {
-                    if nb.ins_len != 0 && nb.start >= g.start && nb.end <= g.end.max(g.start + 1) {
+                let span_hi = g.end.max(g.start + 1);
+                let lo = self
+                    .cfg
+                    .blocks
+                    .partition_point(|nb| nb.start < g.start);
+                for nb in &self.cfg.blocks[lo..] {
+                    if nb.start >= span_hi {
+                        break;
+                    }
+                    if nb.ins_len != 0 && nb.end <= span_hi {
                         eff.insert(nb.id);
                     }
                 }
             }
         }
-        sub.retain(|b| eff.contains(b) && !claimed.contains(b) && !self.is_handler(*b));
+        sub.retain(|b| {
+            (universe.contains(b) || *b == from || eff.contains(b))
+                && !claimed.contains(b)
+                && !self.is_handler(*b)
+        });
         sub.insert(from);
         sub
     }
