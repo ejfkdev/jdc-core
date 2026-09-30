@@ -206,6 +206,17 @@ pub trait Ctx {
         self.field_flags(internal, name).is_some()
     }
 
+    /// True when `internal` declares any field whose RENDERED display
+    /// equals `display` (the registry's rename applied; the raw name
+    /// when no entry exists). Field references carry the DISPLAY name
+    /// at emit time, so shadow checks must compare in display space —
+    /// a raw-named field can render exactly the name another class's
+    /// field displays.
+    fn declares_field_display(&self, internal: &str, display: &str) -> bool {
+        let _ = (internal, display);
+        false
+    }
+
     /// True when `internal` declares a method named `name` (any descriptor).
     fn declares_method_named(&self, internal: &str, name: &str) -> bool {
         let _ = (internal, name);

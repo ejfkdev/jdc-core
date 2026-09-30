@@ -1538,7 +1538,17 @@ impl<'a> Printer<'a> {
                                 let mut sup = Some(cur.clone());
                                 while let Some(c) = sup.take() {
                                     {
-                                        if self.ctx.declares_field(&c, name) {
+                                        // Display-space: the reference's
+                                        // name is the registry DISPLAY
+                                        // (the lift applied it), so the
+                                        // shadow comparison must be too —
+                                        // the nested class's raw `a`
+                                        // displaying `a17` shadows the
+                                        // outer field that displays a17
+                                        // (lark ch6/b$a: `a17.length` bound
+                                        // to the List instead of the
+                                        // outer array).
+                                        if self.ctx.declares_field_display(&c, name) {
                                             shadow = true;
                                             break;
                                         }
