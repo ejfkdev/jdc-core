@@ -2961,7 +2961,10 @@ impl<'a> Printer<'a> {
     }
 
     /// Is `cls` lexically enclosing the CURRENT class in the RENDERED
-    /// layout? Digit-tail classes (anonymous/d8-lambda shapes) are
+    /// layout? Digit-tail classes (anonymous/d8-lambda shapes) and
+    /// `-`-tail classes (Kotlin `X$-CC` facades — `-` is not a Java
+    /// identifier start, so the class renders as a flat mangled
+    /// top-level file, mirroring ddc-dec's clean_member_tail) are
     /// emitted as separate flat top-level files — the nested lexical
     /// scope they would provide does not exist there, so members of an
     /// outer class must be QUALIFIED from them (weibo
@@ -2977,6 +2980,7 @@ impl<'a> Printer<'a> {
             let tail = c.rsplit('$').next().unwrap_or(&c);
             if tail.is_empty()
                 || tail.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+                || tail.starts_with('-')
             {
                 return false; // flat-rendered boundary: no lexical scope
             }
