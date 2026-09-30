@@ -97,6 +97,34 @@ pub fn with_renames<R>(f: impl FnOnce(&HashMap<String, String>) -> R) -> Option<
     RENAMES.get().map(f)
 }
 
+/// Framework-shadow stub names (front-end installs once): references to
+/// these render the RAW framework FQN — only the stub's file identity
+/// relocated.
+static FW_SHADOW: std::sync::OnceLock<crate::fx::FxHashSet<String>> =
+    std::sync::OnceLock::new();
+
+pub fn set_fw_shadow(set: crate::fx::FxHashSet<String>) {
+    let _ = FW_SHADOW.set(set);
+}
+
+pub fn fw_shadow_contains(internal: &str) -> bool {
+    let Some(s) = FW_SHADOW.get() else { return false };
+    // Exact hit, or any $-chain PREFIX hits: a nested FRAMEWORK member
+    // of a stub outer must keep the raw framework name (the front-end's
+    // is_fw_shadow does the same walk).
+    if s.contains(internal) {
+        return true;
+    }
+    let mut idx = internal.len();
+    while let Some(i) = internal[..idx].rfind('$') {
+        if s.contains(&internal[..i]) {
+            return true;
+        }
+        idx = i;
+    }
+    false
+}
+
 pub fn set_class_renames(map: HashMap<String, String>) {
     if !map.is_empty() {
         ACTIVE.store(true, Ordering::Relaxed);

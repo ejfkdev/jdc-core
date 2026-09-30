@@ -223,6 +223,14 @@ pub trait Ctx {
         false
     }
 
+    /// True when `internal` is a framework-shadow stub class (the
+    /// front-end relocates its FILE identity; references render the raw
+    /// framework FQN — the platform class is what the bytecode means).
+    fn is_fw_shadow(&self, internal: &str) -> bool {
+        let _ = internal;
+        false
+    }
+
     /// True when `internal` is an interface.
     fn is_interface(&self, internal: &str) -> bool;
 

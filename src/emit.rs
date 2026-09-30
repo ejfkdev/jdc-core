@@ -3326,7 +3326,13 @@ impl<'a> Printer<'a> {
         // Case-collision renames (`X/Cua` → `X/Cua_2`): the registry is
         // empty for ordinary corpora — one relaxed atomic load.
         let orig_internal = internal;
-        let cow = crate::rename::apply_class_rename(internal);
+        // Framework-shadow stub: the reference means the PLATFORM class —
+        // the raw FQN (only the stub's own file identity relocated).
+        let cow = if self.ctx.is_fw_shadow(internal) {
+            std::borrow::Cow::Borrowed(internal)
+        } else {
+            crate::rename::apply_class_rename(internal)
+        };
         let internal: &str = &cow;
         // Literal-$ top-level class (in pool, no InnerClasses nesting
         // evidence): the $ is part of the SOURCE name (jextract-generated
@@ -3730,7 +3736,14 @@ fn inner_simple(cls: &str) -> String {
     // free function was the one emit-side path bypassing the registry
     // (round-55: declarations carried the rename while `this.new b()`
     // printed the raw tail → cannot-find).
-    let cow = crate::rename::apply_class_rename(cls);
+    // Framework-shadow stub: keep the raw framework name (refs mean the
+    // platform class; only the file identity relocated).
+    let shadowed = crate::rename::fw_shadow_contains(cls);
+    let cow = if shadowed {
+        std::borrow::Cow::Borrowed(cls)
+    } else {
+        crate::rename::apply_class_rename(cls)
+    };
     let cls: &str = &cow;
     let last = cls.rsplit('/').next().unwrap_or(cls);
     // R8 leaves class names ending in `$` (rimet's `ThreadMsg$$$`):
