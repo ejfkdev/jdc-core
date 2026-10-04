@@ -593,7 +593,7 @@ impl<'a> Printer<'a> {
                 if matches!(cond, Expr::Const(ConstVal::Int(1))) {
                     head.push_str("true");
                 } else {
-                    self.expr_bool(cond, &mut head);
+                    head.push_str(&self.cond_str(cond));
                 }
                 head.push(')');
                 self.block_stmt(&head, body);
@@ -604,7 +604,7 @@ impl<'a> Printer<'a> {
                 self.stmt(body);
                 self.indent -= 1;
                 let mut tail = String::from("} while (");
-                self.expr_bool(cond, &mut tail);
+                tail.push_str(&self.cond_str(cond));
                 tail.push_str(");");
                 self.line(&tail);
             }
@@ -623,7 +623,8 @@ impl<'a> Printer<'a> {
                 }
                 head.push_str("; ");
                 if let Some(c) = cond {
-                    self.expr_bool(c, &mut head);
+                    let cs = self.cond_str(c);
+                    head.push_str(&cs);
                 }
                 head.push_str("; ");
                 for (i, u) in update.iter().enumerate() {
@@ -966,10 +967,49 @@ impl<'a> Printer<'a> {
 
     /// Print an if statement; `opener` is "" for the first if and
     /// "} else " when continuing an else-if chain on the closing line.
+    /// The statement-condition position already supplies its own
+    /// parentheses; an expression that renders fully wrapped in ONE
+    /// balanced layer (`((a & b))`, `((v))` — inner parens from a
+    /// composite-boolean fold or a cast-precedence wrap) carries a
+    /// redundant outer layer. Strip only when the FIRST `(` matches
+    /// the LAST `)` (a complete wrap), so `(a) & (b)` and `(cast) x
+    /// <= 0` keep their structural parens.
+    fn strip_outer_parens(s: &str) -> &str {
+        let b = s.as_bytes();
+        if b.len() < 2 || b[0] != b'(' || b[b.len() - 1] != b')' {
+            return s;
+        }
+        let mut depth = 0i32;
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'(' {
+                depth += 1;
+            } else if c == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    if i + 1 == b.len() {
+                        let inner = &s[1..s.len() - 1];
+                        // Recurse: `((x))` peels to `x` — the balanced
+                        // check stops at any structural paren.
+                        return Self::strip_outer_parens(inner);
+                    }
+                    return s;
+                }
+            }
+        }
+        s
+    }
+
+    fn cond_str(&mut self, cond: &Expr) -> String {
+        let mut c = String::new();
+        self.expr_bool(cond, &mut c);
+        let stripped = Self::strip_outer_parens(&c);
+        stripped.to_string()
+    }
+
     fn print_if(&mut self, cond: &Expr, then_stmt: &Stmt, else_stmt: Option<&Stmt>, opener: &str) {
         let mut head = String::from(opener);
         head.push_str("if (");
-        self.expr_bool(cond, &mut head);
+        head.push_str(&self.cond_str(cond));
         head.push_str(") {");
         self.line(&head);
         self.indent += 1;
@@ -2148,12 +2188,23 @@ impl<'a> Printer<'a> {
                         }
                         if l_bool {
                             self.expr(l, 14, out);
-                        } else {
+                        } else if matches!(
+                            &**l,
+                            Expr::Bin { .. } | Expr::Cond { .. } | Expr::Assign { .. }
+                        ) {
                             // Composite boolean (a bitwise bin): parenthesize
-                            // so a leading `!` binds the whole value.
+                            // so a leading `!` binds the whole value. A BARE
+                            // operand — the 0/1 boolean encoding of a const,
+                            // a local whose vt type is stale-Int, a Not —
+                            // cannot regroup and renders bare: the
+                            // unconditional parens wrapped every folded
+                            // comparison into `x = (false)` / `return (!v)`
+                            // (kimi: ~85k noise sites).
                             out.push('(');
                             self.expr_bool(l, out);
                             out.push(')');
+                        } else {
+                            self.expr_bool(l, out);
                         }
                         if parens {
                             out.push(')');
