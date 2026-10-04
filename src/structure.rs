@@ -4113,6 +4113,39 @@ impl<'a> Structurer<'a> {
                                     region_shape(&arm)
                                 );
                             }
+                            /// The parked copy's suffix starting at `t` (a
+                            /// chain-INTERIOR block): the parts from t's
+                            /// position onward, searched recursively through
+                            /// the copy's linear Seq nesting. `None` when t is
+                            /// not a part head anywhere in the copy.
+                            fn slice_copy_from(copy: &Region, t: usize) -> Option<Region> {
+                                match copy {
+                                    Region::Seq(v) => {
+                                        for (i, p) in v.iter().enumerate() {
+                                            if region_head_block(p) == t {
+                                                return Some(if v.len() - i == 1 {
+                                                    p.clone()
+                                                } else {
+                                                    Region::Seq(v[i..].to_vec())
+                                                });
+                                            }
+                                        }
+                                        for p in v {
+                                            if let Some(sfx) = slice_copy_from(p, t) {
+                                                return Some(sfx);
+                                            }
+                                        }
+                                        None
+                                    }
+                                    other => {
+                                        if region_head_block(other) == t {
+                                            Some(other.clone())
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                }
+                            }
                             #[allow(clippy::too_many_arguments)] // structuring context travels as one bundle
                             fn fill_bypass(
                                 st: &mut Structurer,
@@ -4185,6 +4218,39 @@ impl<'a> Structurer<'a> {
                                                         } else {
                                                             *failed = true;
                                                         }
+                                                        continue;
+                                                    }
+                                                    // CHAIN-INTERIOR target: the arm
+                                                    // path's bytecode jumped PAST the
+                                                    // chain head into its middle (weibo
+                                                    // Transmitter.exchangeMessageDone:
+                                                    // the A&&B&&C then-path's
+                                                    // Goto{merge}). Falling through
+                                                    // would re-execute the appended
+                                                    // copy's head — the parked SET the
+                                                    // jump must skip (the flag clobber
+                                                    // `v = true; v = false`). Splice the
+                                                    // copy's suffix from t over the
+                                                    // Goto: the path continues exactly
+                                                    // where its bytecode jumped. The
+                                                    // suffix must end abruptly — a
+                                                    // non-terminating one would fall
+                                                    // out into the appended copy and
+                                                    // re-execute the head anyway.
+                                                    if t != taken
+                                                        && cu2.contains(&t)
+                                                        && slice_copy_from(copy, t)
+                                                            .is_some_and(|sfx| {
+                                                                region_terminates_ex(
+                                                                    &sfx,
+                                                                    st.results,
+                                                                    &[],
+                                                                )
+                                                            })
+                                                    {
+                                                        v[i] =
+                                                            slice_copy_from(copy, t).unwrap();
+                                                        *filled += 1;
                                                         continue;
                                                     }
                                                 }
