@@ -1606,6 +1606,22 @@ impl<'a> Printer<'a> {
                             !shadow
                         };
                     if !enclosing_static && (cls.as_ref() != self.ctx.class_name() || shadowed_by_local) {
+                        // JLS 6.4.2 obscured-owner escape: the dotted
+                        // render's first segment binds to an in-scope
+                        // variable (inherited field), the member chain
+                        // dangles. The import-simple route dies the same
+                        // way when a field owns the simple name — fall
+                        // to the single-static-import (bare member).
+                        // A local named like the member captures the
+                        // bare form (same rule as shadowed_by_local).
+                        if !shadowed_by_local
+                            && !self.vt.vars.iter().any(|v| v.name == name)
+                            && self.ctx.obscured_member_escape(cls, name)
+                        {
+                            // bare: the trailing name print below covers
+                            // the member (Method-arm twin structure — the
+                            // escape only suppresses the qualifier)
+                        } else {
                         // The owner must name a DECLARABLE class: the
                         // anonymous→interface/Object fallback (right for
                         // phi-compatible type positions) leaves the field
@@ -1629,6 +1645,7 @@ impl<'a> Printer<'a> {
                         // check this replaces).
                         out.push_str(&self.shorten_concrete(cls));
                         out.push('.');
+                        }
                     }
                     out.push_str(&java_ident(name));
                 } else if self.private_super_field(cls, name, &Expr::This) {
@@ -1961,7 +1978,13 @@ impl<'a> Printer<'a> {
                                 }
                                 !shadow
                             };
-                        if !enclosing_static {
+                        if self.ctx.obscured_member_escape(cls, name)
+                            && !self.vt.vars.iter().any(|v| *v.name == **name)
+                        {
+                            // JLS 6.4.2 obscured-owner escape (method twin
+                            // of the static-field arm): single-static-import,
+                            // bare member call.
+                        } else if !enclosing_static {
                             // Concrete name: same anon-class trap as the
                             // static FIELD qualifier (the SAM interface
                             // does not declare the synthetic static).

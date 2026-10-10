@@ -87,6 +87,16 @@ pub trait Ctx {
     /// and the render must use the SIMPLE name. Returns the simple
     /// name when so; `None` renders normally. Default None (no import
     /// machinery).
+    /// 静态成员引用的遮蔽逃逸：owner 点分渲染的首段被作用域内的
+    /// 名字（字段/继承成员）遮蔽、且类型导入的简单名同样会被捕获时，
+    /// 成员引用改走**单静态导入**（渲染为裸成员名，前端记录
+    /// `import static owner.member;`）。JLS 6.4.2：表达式名解析优先
+    /// 绑定变量——`d.j.v` 的 d 绑定到继承字段 d 后成员链断裂
+    /// （找不到符号 变量 j）。默认 false（无该机制的前端）。
+    fn obscured_member_escape(&self, _owner: &str, _member: &str) -> bool {
+        false
+    }
+
     fn obscured_simple(&self, _internal: &str) -> Option<String> {
         None
     }
