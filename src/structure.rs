@@ -6837,6 +6837,27 @@ impl<'a> Structurer<'a> {
         for e in &self.cfg.exc_edges {
             exc_succ.entry(e.from).or_default().push(e.to);
         }
+        // A GUARDED-PATTERN switch loop's successors are CASE ENTRIES, not
+        // the loop's exit merge: a case body that jumps out of the loop
+        // (`break`/`continue`/fall-out arms) still belongs to the body.
+        // The exit-merge shortcuts below key on "the header branches to it
+        // directly", which is wrong for a typeSwitch restart loop — it
+        // dropped every non-looping case target from the members, so the
+        // switch lowered them to bare jumps and the follow emitted only the
+        // earliest one (withGuard returned "int" for a String input and
+        // "other" vanished entirely; same for primitive patterns).
+        //
+        // Kept to the pattern-switch lowering on purpose: ordinary
+        // switch-in-loop structuring has years of corpus validation, and a
+        // blanket Term::Switch carve-out rewrote 30 rt.jar units whose
+        // bytecode layout we would then have to re-justify.
+        let header_is_switch = matches!(
+            &self.results[header].term,
+            crate::ir::build::Term::Switch {
+                selector: crate::ir::expr::Expr::Invokedynamic { name, .. },
+                ..
+            } if &**name == "typeSwitch" || &**name == "enumSwitch"
+        );
         let mut members: HashSet<usize> = HashSet::default();
         members.insert(header);
         {
@@ -6905,12 +6926,19 @@ impl<'a> Structurer<'a> {
                         // `append('Z'); return true` landed INSIDE the
                         // while(true) (jdk11/17 DateTimeFormatterBuilder
                         // InstantPrinterParser.format: 缺少返回语句).
-                        let mut exit_edge = preds.iter().any(|&p| {
-                            p == header
-                                || !universe.contains(&p)
-                                || !can_reach_avoiding(self.cfg, &exc_succ, p, header, s, 8192)
-                        });
-                        if !exit_edge {
+                        let mut exit_edge = if header_is_switch {
+                            // Case entries are body blocks; only an
+                            // out-of-universe predecessor can make this a
+                            // shared merge owned by an enclosing scope.
+                            preds.iter().any(|&p| !universe.contains(&p))
+                        } else {
+                            preds.iter().any(|&p| {
+                                p == header
+                                    || !universe.contains(&p)
+                                    || !can_reach_avoiding(self.cfg, &exc_succ, p, header, s, 8192)
+                            })
+                        };
+                        if !exit_edge && !header_is_switch {
                             // Confluence of dedicated escape jumps: every
                             // predecessor also branches to another exit
                             // candidate that cannot reach the header.
