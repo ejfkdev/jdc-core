@@ -3387,6 +3387,29 @@ impl<'a> Printer<'a> {
         false
     }
 
+    /// Cached member-type twin probe: does any class in the emitting
+    /// class's scope (own nestees, supers, enclosing levels) declare a
+    /// member type whose simple display name is `first`?
+    fn member_twin_exists(&self, first: &str) -> bool {
+        // The borrow temp must die before the else arm's borrow_mut
+        // (if-let scrutinee temps live across the whole statement —
+        // RefCell double-borrow panic).
+        let cached = self.twin_cache.borrow().get(first).copied();
+        if let Some(v) = cached {
+            return v;
+        }
+        let v = self.scope_member_walk(&mut |c| {
+            let t1 = format!("{c}${first}");
+            let t2 = format!("{c}$${first}");
+            self.ctx.has_class(&t1)
+                || self.ctx.has_class(&t2)
+                || crate::rename::is_renamed_display(&t1)
+                || crate::rename::is_renamed_display(&t2)
+        });
+        self.twin_cache.borrow_mut().insert(first.to_string(), v);
+        v
+    }
+
     fn shorten_inner(&self, internal: &str, anon_fallback: bool) -> String {
         if internal.is_empty() {
             return String::new();
@@ -3577,6 +3600,12 @@ impl<'a> Printer<'a> {
         let shadowed = |first: &str| {
             self.ctx.declares_field(self.ctx.class_name(), first)
                 || self.vt.vars.iter().any(|v| v.name == first)
+                // A MEMBER type of the same simple name captures `first`
+                // in class scope even for a java.lang reference
+                // (Rectangle2D$Double vs java.lang.Double:
+                // `Double.doubleToLongBits` resolved to the nested class —
+                // 找不到符号 方法 doubleToLongBits(double)).
+                || self.member_twin_exists(first)
         };
         if internal.starts_with("java/lang/") && !internal[10..].contains('/') {
             let simple = if keep_dollar {
@@ -3621,30 +3650,9 @@ impl<'a> Printer<'a> {
             // members); R8 orphans use `$$`, normalization displays use
             // `$`, and rename displays live only in the registry's
             // reverse index — check all four shapes per level.
-            let twin_exists = {
-                // The borrow temp must die before the else arm's
-                // borrow_mut (if-let scrutinee temps live across the
-                // whole statement — RefCell double-borrow panic).
-                let cached = self.twin_cache.borrow().get(first).copied();
-                if let Some(v) = cached {
-                    v
-                } else {
-                    // Own nestees AND inherited member types (the scope
-                    // walk) capture the bare simple name alike.
-                    let v = self.scope_member_walk(&mut |c| {
-                        let t1 = format!("{c}${first}");
-                        let t2 = format!("{c}$${first}");
-                        self.ctx.has_class(&t1)
-                            || self.ctx.has_class(&t2)
-                            || crate::rename::is_renamed_display(&t1)
-                            || crate::rename::is_renamed_display(&t2)
-                    });
-                    self.twin_cache
-                        .borrow_mut()
-                        .insert(first.to_string(), v);
-                    v
-                }
-            };
+            // Own nestees AND inherited member types (the scope walk)
+            // capture the bare simple name alike.
+            let twin_exists = self.member_twin_exists(first);
             // is_twin_ref only matters when a twin exists (otherwise
             // `!twin_exists` already grants the simple form) — keep it
             // off the hot path.
